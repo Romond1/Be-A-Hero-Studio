@@ -6,13 +6,13 @@ export class TimelinePlayer {
   private index = 0;
   private status: 'playing' | 'paused' | 'stopped' = 'stopped';
 
-  loadSection(sectionId: string, sections: Section[]): void {
+  loadSection(sectionId: string, sections: Section[], preserveIndex = false): void {
     const section = sections.find((item) => item.id === sectionId);
     if (!section) {
       throw new Error(`Section not found: ${sectionId}`);
     }
     this.section = section;
-    this.index = 0;
+    this.index = preserveIndex ? Math.min(this.index, Math.max(0, section.timeline.length - 1)) : 0;
     this.status = 'stopped';
   }
 
@@ -34,24 +34,21 @@ export class TimelinePlayer {
 
   next(): TimelineItem | undefined {
     this.ensureSectionLoaded();
-    if (!this.section) {
-      return undefined;
-    }
-    this.index = Math.min(this.index + 1, Math.max(0, this.section.timeline.length - 1));
+    if (!this.section || this.section.timeline.length === 0) return undefined;
+    this.index = Math.min(this.index + 1, this.section.timeline.length - 1);
     return this.current();
   }
 
   prev(): TimelineItem | undefined {
     this.ensureSectionLoaded();
+    if (!this.section || this.section.timeline.length === 0) return undefined;
     this.index = Math.max(0, this.index - 1);
     return this.current();
   }
 
   goto(itemId: string): TimelineItem | undefined {
     this.ensureSectionLoaded();
-    if (!this.section) {
-      return undefined;
-    }
+    if (!this.section) return undefined;
     const itemIndex = this.section.timeline.findIndex((item) => item.id === itemId);
     if (itemIndex >= 0) {
       this.index = itemIndex;
@@ -60,12 +57,46 @@ export class TimelinePlayer {
     throw new Error(`Item ${itemId} not found in active section`);
   }
 
+  gotoIndex(index: number): TimelineItem | undefined {
+    this.ensureSectionLoaded();
+    if (!this.section || this.section.timeline.length === 0) return undefined;
+    this.index = Math.max(0, Math.min(index, this.section.timeline.length - 1));
+    return this.current();
+  }
+
+  first(): TimelineItem | undefined {
+    return this.gotoIndex(0);
+  }
+
+  last(): TimelineItem | undefined {
+    this.ensureSectionLoaded();
+    if (!this.section) return undefined;
+    return this.gotoIndex(this.section.timeline.length - 1);
+  }
+
+  nextPageBreak(): TimelineItem | undefined {
+    this.ensureSectionLoaded();
+    if (!this.section) return undefined;
+    const nextIndex = this.section.timeline.findIndex(
+      (item, idx) => idx > this.index && item.type === 'pageBreak'
+    );
+    if (nextIndex >= 0) {
+      this.index = nextIndex;
+      return this.current();
+    }
+    return undefined;
+  }
+
   setMode(mode: TimelineMode): void {
     this.mode = mode;
   }
 
   current(): TimelineItem | undefined {
     return this.section?.timeline[this.index];
+  }
+
+  getIndex(): number {
+    return this.index;
   }
 
   getState(): { mode: TimelineMode; status: string; index: number } {

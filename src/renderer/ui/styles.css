@@ -11,3 +11,5 @@ aside, .viewer { border: 1px solid #ddd; padding: 8px; overflow: auto; }
 .status.error { background: #ffdddd; }
 .status.info { background: #e5f0ff; }
 .controls { margin-top: 10px; display: flex; gap: 8px; }
+
+.slide-img { max-width: 100%; max-height: 100%; object-fit: contain; }

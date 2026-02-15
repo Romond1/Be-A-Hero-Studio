@@ -1,10 +1,10 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type { ProjectManifest } from '../renderer/types/domain';
 
-const api = {
+const studioApi = {
   createProject: () => ipcRenderer.invoke('project:create'),
   openProject: () => ipcRenderer.invoke('project:open'),
-  importAsset: (projectPath: string) => ipcRenderer.invoke('asset:import', { projectPath }),
+  importAssets: (projectPath: string) => ipcRenderer.invoke('asset:importMany', { projectPath }),
   saveManifest: (projectPath: string, manifest: ProjectManifest) =>
     ipcRenderer.invoke('project:save', { projectPath, manifest }),
   autosaveManifest: (projectPath: string, manifest: ProjectManifest) =>
@@ -13,9 +13,14 @@ const api = {
   exportProject: (projectPath: string, manifest: ProjectManifest) =>
     ipcRenderer.invoke('project:export', { projectPath, manifest }),
   healthCheck: (projectPath: string, manifest: ProjectManifest) =>
-    ipcRenderer.invoke('project:healthCheck', { projectPath, manifest }),
-  getAssetPath: (projectPath: string, assetId: string, ext: string) =>
-    ipcRenderer.invoke('asset:path', { projectPath, assetId, ext })
+    ipcRenderer.invoke('project:healthCheck', { projectPath, manifest })
 };
 
-contextBridge.exposeInMainWorld('studioApi', api);
+const studio = {
+  assets: {
+    readDataUrl: (assetId: string) => ipcRenderer.invoke('assets:readDataUrl', { assetId })
+  }
+};
+
+contextBridge.exposeInMainWorld('studioApi', studioApi);
+contextBridge.exposeInMainWorld('studio', studio);

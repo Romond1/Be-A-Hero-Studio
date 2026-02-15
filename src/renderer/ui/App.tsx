@@ -4,15 +4,15 @@ import { TimelinePlayer } from '../core/timelinePlayer';
 import { AutopilotModule } from '../modules/AutopilotModule';
 import { ModuleRegistry } from '../modules/registry';
 import { TranslationModule } from '../modules/TranslationModule';
-import { useStudioStore } from './store/studioStore';
 import { autosaveProject, exportProject as exportProjectFile, saveProject as saveProjectFile } from '../persistence/projectClient';
-import type { SlideItem } from '../types/domain';
+import type { SlideItem, TimelineItem } from '../types/domain';
+import { useStudioStore } from './store/studioStore';
 
 const moduleRegistry = new ModuleRegistry();
 moduleRegistry.register(TranslationModule);
 moduleRegistry.register(AutopilotModule);
 
-const autosaveEveryMs = 60000;
+const autosaveEveryMs = 30000;
 
 export function App() {
   const {
@@ -20,17 +20,21 @@ export function App() {
     manifest,
     selectedSectionId,
     selectedItemId,
+    currentTimelineIndex,
+    assetDataUrlCache,
     status,
     healthIssues,
     lastSavedAt,
     lastAutosaveAt,
     setManifest,
+    hydrateRecovered,
     setStatus,
     addSection,
     renameSection,
     reorderSections,
     selectSection,
     selectItem,
+    setCurrentTimelineIndex,
     addTimelineItemAfterSelection,
     addPageBreak,
     updatePageBreak,
@@ -39,11 +43,13 @@ export function App() {
     markSaved,
     markAutosaved,
     runHealthCheck,
-    registerAsset
+    registerAsset,
+    cacheAssetDataUrl
   } = useStudioStore();
 
   const [sectionDragIndex, setSectionDragIndex] = useState<number | null>(null);
   const [timelineDragIndex, setTimelineDragIndex] = useState<number | null>(null);
+  const [isPlaying, setIsPlaying] = useState(false);
   const playerRef = useRef(new TimelinePlayer());
   const dirtyRef = useRef(false);
 
@@ -51,7 +57,33 @@ export function App() {
     () => manifest.sections.find((item) => item.id === selectedSectionId) ?? manifest.sections[0],
     [manifest.sections, selectedSectionId]
   );
+
   const selectedItem = section?.timeline.find((item) => item.id === selectedItemId);
+
+  useEffect(() => {
+    if (!section) return;
+    try {
+      playerRef.current.loadSection(section.id, manifest.sections, true);
+      if (section.timeline.length && selectedItemId) {
+        playerRef.current.goto(selectedItemId);
+      } else if (section.timeline.length) {
+        const item = playerRef.current.first();
+        if (item) selectItem(item.id);
+      }
+    } catch (error) {
+      setStatus({ type: 'error', text: (error as Error).message });
+    }
+  }, [section?.id, manifest.sections, selectedItemId, selectItem, setStatus]);
+
+  useEffect(() => {
+    if (!selectedItem || selectedItem.type !== 'slide') return;
+    if (assetDataUrlCache[selectedItem.assetId]) return;
+    // NOTE: cache resolved image dataURLs to avoid repeated IPC reads while navigating.
+    void window.studio.assets
+      .readDataUrl(selectedItem.assetId)
+      .then((dataUrl) => cacheAssetDataUrl(selectedItem.assetId, dataUrl))
+      .catch((error: Error) => setStatus({ type: 'error', text: error.message }));
+  }, [assetDataUrlCache, cacheAssetDataUrl, selectedItem, setStatus]);
 
   useEffect(() => {
     dirtyRef.current = true;
@@ -65,7 +97,7 @@ export function App() {
       } catch (error) {
         setStatus({ type: 'error', text: (error as Error).message });
       }
-    }, 1200);
+    }, 1500);
     return () => clearTimeout(handle);
   }, [manifest, projectPath, markAutosaved, setStatus]);
 
@@ -81,6 +113,58 @@ export function App() {
     }, autosaveEveryMs);
     return () => clearInterval(interval);
   }, [manifest, markAutosaved, projectPath, setStatus]);
+
+  const moveToItem = (item: TimelineItem | undefined) => {
+    if (!item) return;
+    selectItem(item.id);
+    setCurrentTimelineIndex(playerRef.current.getIndex());
+  };
+
+  const nav = (action: 'next' | 'prev' | 'first' | 'last' | 'nextPageBreak') => {
+    if (!section) return;
+    try {
+      let item: TimelineItem | undefined;
+      if (action === 'next') item = playerRef.current.next();
+      if (action === 'prev') item = playerRef.current.prev();
+      if (action === 'first') item = playerRef.current.first();
+      if (action === 'last') item = playerRef.current.last();
+      if (action === 'nextPageBreak') item = playerRef.current.nextPageBreak();
+      moveToItem(item);
+    } catch (error) {
+      setStatus({ type: 'error', text: (error as Error).message });
+    }
+  };
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'ArrowRight') {
+        event.preventDefault();
+        nav('next');
+      } else if (event.key === 'ArrowLeft') {
+        event.preventDefault();
+        nav('prev');
+      } else if (event.key === 'Home') {
+        event.preventDefault();
+        nav('first');
+      } else if (event.key === 'End') {
+        event.preventDefault();
+        nav('last');
+      } else if (event.key === ' ') {
+        event.preventDefault();
+        if (isPlaying) {
+          playerRef.current.pause();
+          setIsPlaying(false);
+        } else {
+          playerRef.current.play();
+          setIsPlaying(true);
+        }
+      }
+    };
+
+    // NOTE: window-level keyboard listener; does not require timeline focus.
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [isPlaying]);
 
   const createProject = async () => {
     try {
@@ -117,7 +201,9 @@ export function App() {
     if (!projectPath) return;
     try {
       const result = await window.studioApi.recoverProject(projectPath);
-      setManifest(projectPath, result.manifest);
+      // NOTE: explicit store hydration path for recovery and timeline index reset.
+      useStudioStore.setState((state) => ({ ...state }));
+      hydrateRecovered(projectPath, result.manifest);
       setStatus({ type: 'success', text: `Recovered from ${result.autosavePath}` });
     } catch (error) {
       setStatus({ type: 'error', text: (error as Error).message });
@@ -137,29 +223,36 @@ export function App() {
     }
   };
 
-  const importAssetToTimeline = async () => {
+  const importSlides = async () => {
     if (!projectPath) return;
     try {
-      const asset = await window.studioApi.importAsset(projectPath);
-      registerAsset(asset.assetId, {
-        ext: asset.ext,
-        mime: asset.mime,
-        originalFileName: asset.originalFileName,
-        size: asset.size,
-        hash: asset.hash
-      });
-      const slide: SlideItem = {
-        id: uuid(),
-        type: 'slide',
-        assetId: asset.assetId,
-        label: asset.originalFileName,
-        transition: 'cut',
-        durationMs: 10000,
-        panDirection: 'none',
-        dialogueItems: []
-      };
-      addTimelineItemAfterSelection(slide);
-      setStatus({ type: 'success', text: `Imported asset ${asset.originalFileName} -> ${asset.assetPath}` });
+      const assets = await window.studioApi.importAssets(projectPath);
+      for (const asset of assets) {
+        registerAsset(asset.assetId, {
+          ext: asset.ext,
+          mime: asset.mime,
+          originalFileName: asset.originalFileName,
+          size: asset.size,
+          hash: asset.hash
+        });
+      }
+
+      let inserted = 0;
+      for (const asset of assets) {
+        const slide: SlideItem = {
+          id: uuid(),
+          type: 'slide',
+          assetId: asset.assetId,
+          label: asset.originalFileName,
+          transition: 'cut',
+          durationMs: 10000,
+          panDirection: 'none',
+          dialogueItems: []
+        };
+        addTimelineItemAfterSelection(slide);
+        inserted += 1;
+      }
+      setStatus({ type: 'success', text: `Imported ${inserted} slide(s)` });
     } catch (error) {
       setStatus({ type: 'error', text: (error as Error).message });
     }
@@ -168,16 +261,18 @@ export function App() {
   const importMusic = async () => {
     if (!projectPath) return;
     try {
-      const asset = await window.studioApi.importAsset(projectPath);
-      registerAsset(asset.assetId, {
-        ext: asset.ext,
-        mime: asset.mime,
-        originalFileName: asset.originalFileName,
-        size: asset.size,
-        hash: asset.hash
-      });
-      addMusicItem(asset.assetId, asset.originalFileName);
-      setStatus({ type: 'success', text: `Imported music ${asset.originalFileName}` });
+      const assets = await window.studioApi.importAssets(projectPath);
+      for (const asset of assets) {
+        registerAsset(asset.assetId, {
+          ext: asset.ext,
+          mime: asset.mime,
+          originalFileName: asset.originalFileName,
+          size: asset.size,
+          hash: asset.hash
+        });
+        addMusicItem(asset.assetId, asset.originalFileName);
+      }
+      setStatus({ type: 'success', text: `Imported ${assets.length} music item(s)` });
     } catch (error) {
       setStatus({ type: 'error', text: (error as Error).message });
     }
@@ -197,16 +292,8 @@ export function App() {
     }
   };
 
-  const nav = (direction: 'next' | 'prev') => {
-    if (!section) return;
-    try {
-      playerRef.current.loadSection(section.id, manifest.sections);
-      const item = direction === 'next' ? playerRef.current.next() : playerRef.current.prev();
-      if (item) selectItem(item.id);
-    } catch (error) {
-      setStatus({ type: 'error', text: (error as Error).message });
-    }
-  };
+  const slideDataUrl =
+    selectedItem?.type === 'slide' ? assetDataUrlCache[selectedItem.assetId] : undefined;
 
   return (
     <div className="app">
@@ -217,12 +304,13 @@ export function App() {
         <button onClick={recoverProject}>Recover Autosave</button>
         <button onClick={exportProject}>Export .tstudio</button>
         <button onClick={checkHealth}>Health Check</button>
-        <button onClick={importAssetToTimeline}>Import Slide</button>
+        <button onClick={importSlides}>Import Slide(s)</button>
         <button onClick={importMusic}>Import Music</button>
         <button onClick={addPageBreak}>Add PageBreak</button>
       </header>
       <div className="timestamps">
         <span>Project: {projectPath ?? 'none'}</span>
+        <span>Index: {currentTimelineIndex}</span>
         <span>Last Save: {lastSavedAt ?? 'n/a'}</span>
         <span>Last Autosave: {lastAutosaveAt ?? 'n/a'}</span>
       </div>
@@ -256,10 +344,13 @@ export function App() {
               onDrop={() => {
                 if (timelineDragIndex !== null) reorderTimeline(timelineDragIndex, index);
               }}
-              onClick={() => selectItem(item.id)}
+              onClick={() => {
+                selectItem(item.id);
+                setCurrentTimelineIndex(index);
+              }}
               className={selectedItemId === item.id ? 'selected' : ''}
             >
-              {item.type}: {item.type === 'pageBreak' ? item.title : item.label}
+              {index + 1}. {item.type}: {item.type === 'pageBreak' ? item.title : item.label}
             </div>
           ))}
         </aside>
@@ -267,7 +358,9 @@ export function App() {
           <h3>Viewer Stage (OBS)</h3>
           <div className="stage">
             {selectedItem ? (
-              selectedItem.type === 'pageBreak' ? (
+              selectedItem.type === 'slide' ? (
+                slideDataUrl ? <img src={slideDataUrl} alt={selectedItem.label} className="slide-img" /> : <p>Loading image…</p>
+              ) : selectedItem.type === 'pageBreak' ? (
                 <div>
                   <h2>{selectedItem.title}</h2>
                   <p>{selectedItem.questionsText}</p>
@@ -285,14 +378,7 @@ export function App() {
           <div className="controls">
             <button onClick={() => nav('prev')}>Prev</button>
             <button onClick={() => nav('next')}>Next</button>
-            <button
-              onClick={() => {
-                const breakItem = section?.timeline.find((item) => item.type === 'pageBreak');
-                if (breakItem) selectItem(breakItem.id);
-              }}
-            >
-              Jump PageBreak
-            </button>
+            <button onClick={() => nav('nextPageBreak')}>Jump Next PageBreak</button>
           </div>
         </section>
         <aside>

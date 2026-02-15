@@ -13,17 +13,21 @@ interface StudioStore {
   manifest: ProjectManifest;
   selectedSectionId?: string;
   selectedItemId?: string;
+  currentTimelineIndex: number;
+  assetDataUrlCache: Record<string, string>;
   lastSavedAt?: string;
   lastAutosaveAt?: string;
   status?: StatusMessage;
   healthIssues: string[];
   setStatus: (status: StatusMessage) => void;
   setManifest: (projectPath: string, manifest: ProjectManifest) => void;
+  hydrateRecovered: (projectPath: string, manifest: ProjectManifest) => void;
   addSection: () => void;
   renameSection: (id: string, title: string) => void;
   reorderSections: (sourceIndex: number, targetIndex: number) => void;
   selectSection: (sectionId: string) => void;
   selectItem: (itemId?: string) => void;
+  setCurrentTimelineIndex: (index: number) => void;
   addTimelineItemAfterSelection: (item: TimelineItem) => void;
   addPageBreak: () => void;
   updatePageBreak: (id: string, patch: Partial<PageBreakItem>) => void;
@@ -33,29 +37,20 @@ interface StudioStore {
   markAutosaved: (at: string) => void;
   runHealthCheck: () => void;
   registerAsset: (assetId: string, meta: ProjectManifest['assetRegistry'][string]) => void;
+  cacheAssetDataUrl: (assetId: string, dataUrl: string) => void;
 }
 
 const blankManifest = (): ProjectManifest => ({
   schemaVersion: 1,
   createdAt: new Date().toISOString(),
   updatedAt: new Date().toISOString(),
-  sections: [
-    {
-      id: uuid(),
-      title: 'Section 1',
-      order: 0,
-      musicItems: [],
-      timeline: []
-    }
-  ],
+  sections: [{ id: uuid(), title: 'Section 1', order: 0, musicItems: [], timeline: [] }],
   assetRegistry: {}
 });
 
 function withSelectedSection(manifest: ProjectManifest, sectionId?: string): Section {
   const section = manifest.sections.find((item) => item.id === sectionId) ?? manifest.sections[0];
-  if (!section) {
-    throw new Error('No section available');
-  }
+  if (!section) throw new Error('No section available');
   return section;
 }
 
@@ -63,16 +58,33 @@ export const useStudioStore = create<StudioStore>((set, get) => ({
   manifest: blankManifest(),
   selectedSectionId: undefined,
   selectedItemId: undefined,
+  currentTimelineIndex: 0,
+  assetDataUrlCache: {},
   healthIssues: [],
   setStatus: (status) => set({ status }),
-  setManifest: (projectPath, manifest) =>
+  setManifest: (projectPath, manifest) => {
+    const firstSectionId = manifest.sections[0]?.id;
+    const firstItemId = manifest.sections[0]?.timeline[0]?.id;
     set({
       projectPath,
       manifest,
-      selectedSectionId: manifest.sections[0]?.id,
-      selectedItemId: undefined,
+      selectedSectionId: firstSectionId,
+      selectedItemId: firstItemId,
+      currentTimelineIndex: firstItemId ? 0 : 0,
       healthIssues: validateManifest(manifest)
-    }),
+    });
+  },
+  hydrateRecovered: (projectPath, manifest) => {
+    const firstSection = manifest.sections[0];
+    set({
+      projectPath,
+      manifest,
+      selectedSectionId: firstSection?.id,
+      selectedItemId: firstSection?.timeline[0]?.id,
+      currentTimelineIndex: 0,
+      healthIssues: validateManifest(manifest)
+    });
+  },
   addSection: () =>
     set((state) => {
       const section = {
@@ -88,7 +100,9 @@ export const useStudioStore = create<StudioStore>((set, get) => ({
           updatedAt: new Date().toISOString(),
           sections: [...state.manifest.sections, section]
         },
-        selectedSectionId: section.id
+        selectedSectionId: section.id,
+        selectedItemId: undefined,
+        currentTimelineIndex: 0
       };
     }),
   renameSection: (id, title) =>
@@ -112,8 +126,33 @@ export const useStudioStore = create<StudioStore>((set, get) => ({
         }
       };
     }),
-  selectSection: (selectedSectionId) => set({ selectedSectionId, selectedItemId: undefined }),
-  selectItem: (selectedItemId) => set({ selectedItemId }),
+  selectSection: (selectedSectionId) =>
+    set((state) => {
+      const section = state.manifest.sections.find((item) => item.id === selectedSectionId);
+      return {
+        selectedSectionId,
+        selectedItemId: section?.timeline[0]?.id,
+        currentTimelineIndex: 0
+      };
+    }),
+  selectItem: (selectedItemId) =>
+    set((state) => {
+      const section = withSelectedSection(state.manifest, state.selectedSectionId);
+      const index = section.timeline.findIndex((item) => item.id === selectedItemId);
+      return {
+        selectedItemId,
+        currentTimelineIndex: index >= 0 ? index : state.currentTimelineIndex
+      };
+    }),
+  setCurrentTimelineIndex: (currentTimelineIndex) =>
+    set((state) => {
+      const section = withSelectedSection(state.manifest, state.selectedSectionId);
+      const clamped = Math.max(0, Math.min(currentTimelineIndex, Math.max(0, section.timeline.length - 1)));
+      return {
+        currentTimelineIndex: clamped,
+        selectedItemId: section.timeline[clamped]?.id
+      };
+    }),
   addTimelineItemAfterSelection: (item) =>
     set((state) => {
       const section = withSelectedSection(state.manifest, state.selectedSectionId);
@@ -129,7 +168,8 @@ export const useStudioStore = create<StudioStore>((set, get) => ({
             value.id === section.id ? { ...value, timeline } : value
           )
         },
-        selectedItemId: item.id
+        selectedItemId: item.id,
+        currentTimelineIndex: insertAt
       };
     }),
   addPageBreak: () => {
@@ -169,7 +209,9 @@ export const useStudioStore = create<StudioStore>((set, get) => ({
           sections: state.manifest.sections.map((item) =>
             item.id === section.id ? { ...item, timeline } : item
           )
-        }
+        },
+        currentTimelineIndex: target,
+        selectedItemId: timeline[target]?.id
       };
     }),
   addMusicItem: (assetId, label) =>
@@ -183,10 +225,7 @@ export const useStudioStore = create<StudioStore>((set, get) => ({
             entry.id === section.id
               ? {
                   ...entry,
-                  musicItems: [
-                    ...entry.musicItems,
-                    { id: uuid(), assetId, label, loop: true, volume: 1 }
-                  ]
+                  musicItems: [...entry.musicItems, { id: uuid(), assetId, label, loop: true, volume: 1 }]
                 }
               : entry
           )
@@ -203,6 +242,8 @@ export const useStudioStore = create<StudioStore>((set, get) => ({
         assetRegistry: { ...state.manifest.assetRegistry, [assetId]: meta }
       }
     })),
+  cacheAssetDataUrl: (assetId, dataUrl) =>
+    set((state) => ({ assetDataUrlCache: { ...state.assetDataUrlCache, [assetId]: dataUrl } })),
   runHealthCheck: () => {
     const manifest = get().manifest;
     set({ healthIssues: validateManifest(manifest) });

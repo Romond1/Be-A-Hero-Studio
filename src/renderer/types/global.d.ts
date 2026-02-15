@@ -1,20 +1,21 @@
 import type { ProjectManifest } from './domain';
 
+type ImportedAsset = {
+  assetId: string;
+  ext: string;
+  mime: string;
+  originalFileName: string;
+  size: number;
+  hash: string;
+  assetPath: string;
+};
+
 declare global {
   interface Window {
     studioApi: {
       createProject: () => Promise<{ projectPath: string; manifest: ProjectManifest }>;
       openProject: () => Promise<{ projectPath: string; manifest: ProjectManifest }>;
-      importAsset: (projectPath: string) => Promise<{
-        assetId: string;
-        ext: string;
-        mime: string;
-        originalFileName: string;
-        size: number;
-        hash: string;
-        assetPath: string;
-        thumbPath?: string;
-      }>;
+      importAssets: (projectPath: string) => Promise<ImportedAsset[]>;
       saveManifest: (
         projectPath: string,
         manifest: ProjectManifest
@@ -28,11 +29,12 @@ declare global {
         projectPath: string,
         manifest: ProjectManifest
       ) => Promise<{ exportPath: string; size: number; validatedAssets: number; logPath: string }>;
-      healthCheck: (
-        projectPath: string,
-        manifest: ProjectManifest
-      ) => Promise<{ missing: string[] }>;
-      getAssetPath: (projectPath: string, assetId: string, ext: string) => Promise<string>;
+      healthCheck: (projectPath: string, manifest: ProjectManifest) => Promise<{ missing: string[] }>;
+    };
+    studio: {
+      assets: {
+        readDataUrl: (assetId: string) => Promise<string>;
+      };
     };
   }
 }
