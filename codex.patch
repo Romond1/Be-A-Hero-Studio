@@ -5522,10 +5522,10 @@ index 0000000000000000000000000000000000000000..ac765b8311a34cf580809eafe16fca9c
 +}
 diff --git a/src/main/index.ts b/src/main/index.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..dced79fab108231f5d0cf5fb6ef2600d54f2166d
+index 0000000000000000000000000000000000000000..c10b4f1dd1e4a0c9a82d5e6f985622dc3fc2bb7c
 --- /dev/null
 +++ b/src/main/index.ts
-@@ -0,0 +1,266 @@
+@@ -0,0 +1,307 @@
 +import { app, BrowserWindow, dialog, ipcMain } from 'electron';
 +import { createHash } from 'node:crypto';
 +import { createWriteStream } from 'node:fs';
@@ -5536,6 +5536,13 @@ index 0000000000000000000000000000000000000000..dced79fab108231f5d0cf5fb6ef2600d
 +import type { ProjectManifest } from '../renderer/types/domain';
 +
 +const isDev = !app.isPackaged;
++
++interface ProjectContext {
++  projectPath?: string;
++  manifest?: ProjectManifest;
++}
++
++const projectContext: ProjectContext = {};
 +
 +async function atomicWrite(filePath: string, data: string): Promise<void> {
 +  const tempPath = `${filePath}.tmp`;
@@ -5562,16 +5569,43 @@ index 0000000000000000000000000000000000000000..dced79fab108231f5d0cf5fb6ef2600d
 +    schemaVersion: 1,
 +    createdAt: now,
 +    updatedAt: now,
-+    sections: [
-+      {
-+        id: uuid(),
-+        title: 'Section 1',
-+        order: 0,
-+        musicItems: [],
-+        timeline: []
-+      }
-+    ],
++    sections: [{ id: uuid(), title: 'Section 1', order: 0, musicItems: [], timeline: [] }],
 +    assetRegistry: {}
++  };
++}
++
++function readMime(ext: string): string {
++  const normalized = ext.toLowerCase();
++  if (normalized === 'png') return 'image/png';
++  if (normalized === 'jpg' || normalized === 'jpeg') return 'image/jpeg';
++  if (normalized === 'webp') return 'image/webp';
++  if (normalized === 'gif') return 'image/gif';
++  if (normalized === 'mp4') return 'video/mp4';
++  if (normalized === 'mp3') return 'audio/mpeg';
++  return 'application/octet-stream';
++}
++
++function setProjectContext(projectPath: string, manifest: ProjectManifest): void {
++  projectContext.projectPath = projectPath;
++  projectContext.manifest = manifest;
++}
++
++async function importFileIntoProject(projectPath: string, sourcePath: string) {
++  const stat = await fs.stat(sourcePath);
++  const ext = path.extname(sourcePath).replace('.', '').toLowerCase();
++  const assetId = uuid();
++  const targetPath = path.join(projectPath, 'assets', `${assetId}.${ext}`);
++  const content = await fs.readFile(sourcePath);
++  await fs.writeFile(targetPath, content);
++  const hash = createHash('sha256').update(content).digest('hex');
++  return {
++    assetId,
++    ext,
++    mime: readMime(ext),
++    originalFileName: path.basename(sourcePath),
++    size: stat.size,
++    hash,
++    assetPath: targetPath
 +  };
 +}
 +
@@ -5598,51 +5632,37 @@ index 0000000000000000000000000000000000000000..dced79fab108231f5d0cf5fb6ef2600d
 +
 +  ipcMain.handle('project:create', async () => {
 +    const result = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] });
-+    if (result.canceled || !result.filePaths[0]) {
-+      throw new Error('Project creation cancelled');
-+    }
++    if (result.canceled || !result.filePaths[0]) throw new Error('Project creation cancelled');
 +    const projectPath = result.filePaths[0];
 +    await ensureProjectFolders(projectPath);
 +    const manifest = defaultManifest();
 +    await atomicWrite(path.join(projectPath, 'manifest.json'), JSON.stringify(manifest, null, 2));
++    setProjectContext(projectPath, manifest);
 +    await writeLog(projectPath, `project:create ${projectPath}`);
 +    return { projectPath, manifest };
 +  });
 +
 +  ipcMain.handle('project:open', async () => {
 +    const result = await dialog.showOpenDialog({ properties: ['openDirectory'] });
-+    if (result.canceled || !result.filePaths[0]) {
-+      throw new Error('Open cancelled');
-+    }
++    if (result.canceled || !result.filePaths[0]) throw new Error('Open cancelled');
 +    const projectPath = result.filePaths[0];
 +    const manifestText = await fs.readFile(path.join(projectPath, 'manifest.json'), 'utf-8');
-+    return { projectPath, manifest: JSON.parse(manifestText) as ProjectManifest };
++    const manifest = JSON.parse(manifestText) as ProjectManifest;
++    setProjectContext(projectPath, manifest);
++    return { projectPath, manifest };
 +  });
 +
-+  ipcMain.handle('asset:import', async (_event, { projectPath }: { projectPath: string }) => {
-+    const result = await dialog.showOpenDialog({ properties: ['openFile'] });
-+    if (result.canceled || !result.filePaths[0]) {
-+      throw new Error('Asset import cancelled');
++  // NOTE: multi-select import for stable bulk slide insertion.
++  ipcMain.handle('asset:importMany', async (_event, { projectPath }: { projectPath: string }) => {
++    const result = await dialog.showOpenDialog({ properties: ['openFile', 'multiSelections'] });
++    if (result.canceled || !result.filePaths.length) throw new Error('Asset import cancelled');
++    const orderedPaths = [...result.filePaths].sort((a, b) => path.basename(a).localeCompare(path.basename(b)));
++    const assets = [];
++    for (const sourcePath of orderedPaths) {
++      assets.push(await importFileIntoProject(projectPath, sourcePath));
 +    }
-+    const sourcePath = result.filePaths[0];
-+    const stat = await fs.stat(sourcePath);
-+    const ext = path.extname(sourcePath).replace('.', '').toLowerCase();
-+    const assetId = uuid();
-+    const targetPath = path.join(projectPath, 'assets', `${assetId}.${ext}`);
-+    const content = await fs.readFile(sourcePath);
-+    await fs.writeFile(targetPath, content);
-+    const hash = createHash('sha256').update(content).digest('hex');
-+    const mime = ext === 'mp4' ? 'video/mp4' : ext === 'mp3' ? 'audio/mpeg' : `image/${ext}`;
-+    await writeLog(projectPath, `asset:import ${sourcePath} -> ${targetPath}`);
-+    return {
-+      assetId,
-+      ext,
-+      mime,
-+      originalFileName: path.basename(sourcePath),
-+      size: stat.size,
-+      hash,
-+      assetPath: targetPath
-+    };
++    await writeLog(projectPath, `asset:importMany count=${assets.length}`);
++    return assets;
 +  });
 +
 +  ipcMain.handle(
@@ -5651,6 +5671,7 @@ index 0000000000000000000000000000000000000000..dced79fab108231f5d0cf5fb6ef2600d
 +      const nextManifest = { ...manifest, updatedAt: new Date().toISOString() };
 +      const manifestPath = path.join(projectPath, 'manifest.json');
 +      await atomicWrite(manifestPath, JSON.stringify(nextManifest, null, 2));
++      setProjectContext(projectPath, nextManifest);
 +      const logPath = await writeLog(projectPath, `project:save ${manifestPath}`);
 +      return { manifestPath, savedAt: nextManifest.updatedAt, logPath };
 +    }
@@ -5661,7 +5682,8 @@ index 0000000000000000000000000000000000000000..dced79fab108231f5d0cf5fb6ef2600d
 +    async (_event, { projectPath, manifest }: { projectPath: string; manifest: ProjectManifest }) => {
 +      const autosaveDir = path.join(projectPath, 'autosave');
 +      await fs.mkdir(autosaveDir, { recursive: true });
-+      const payload = JSON.stringify({ ...manifest, updatedAt: new Date().toISOString() }, null, 2);
++      const autosaveManifest = { ...manifest, updatedAt: new Date().toISOString() };
++      const payload = JSON.stringify(autosaveManifest, null, 2);
 +      const latestPath = path.join(autosaveDir, 'autosave_latest.json');
 +      await atomicWrite(latestPath, payload);
 +      for (let index = 10; index >= 2; index -= 1) {
@@ -5670,23 +5692,43 @@ index 0000000000000000000000000000000000000000..dced79fab108231f5d0cf5fb6ef2600d
 +        try {
 +          await fs.rename(from, to);
 +        } catch (error) {
-+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-+            throw error;
-+          }
++          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
 +        }
 +      }
 +      await atomicWrite(path.join(autosaveDir, 'autosave_001.json'), payload);
-+      const savedAt = new Date().toISOString();
++      setProjectContext(projectPath, autosaveManifest);
++      const savedAt = autosaveManifest.updatedAt;
 +      const logPath = await writeLog(projectPath, `project:autosave ${latestPath}`);
 +      return { autosavePath: latestPath, savedAt, logPath };
 +    }
 +  );
 +
++  // NOTE: recovery chooses newest autosave on disk, not only autosave_latest.
 +  ipcMain.handle('project:recover', async (_event, { projectPath }: { projectPath: string }) => {
-+    const autosavePath = path.join(projectPath, 'autosave', 'autosave_latest.json');
-+    const data = await fs.readFile(autosavePath, 'utf-8');
-+    await writeLog(projectPath, `project:recover ${autosavePath}`);
-+    return { manifest: JSON.parse(data) as ProjectManifest, autosavePath };
++    const autosaveDir = path.join(projectPath, 'autosave');
++    const entries = await fs.readdir(autosaveDir);
++    const candidates = entries.filter((name) => name.startsWith('autosave_') && name.endsWith('.json'));
++    if (!candidates.length) throw new Error('No autosave files found for recovery');
++
++    let latestFile = '';
++    let latestMtime = 0;
++    for (const candidate of candidates) {
++      const fullPath = path.join(autosaveDir, candidate);
++      const stat = await fs.stat(fullPath);
++      if (stat.mtimeMs > latestMtime) {
++        latestMtime = stat.mtimeMs;
++        latestFile = fullPath;
++      }
++    }
++
++    const data = await fs.readFile(latestFile, 'utf-8');
++    const manifest = JSON.parse(data) as ProjectManifest;
++    if (!manifest.sections || !Array.isArray(manifest.sections)) {
++      throw new Error(`Invalid autosave format at ${latestFile}`);
++    }
++    setProjectContext(projectPath, manifest);
++    await writeLog(projectPath, `project:recover ${latestFile}`);
++    return { manifest, autosavePath: latestFile };
 +  });
 +
 +  ipcMain.handle(
@@ -5702,6 +5744,7 @@ index 0000000000000000000000000000000000000000..dced79fab108231f5d0cf5fb6ef2600d
 +        });
 +        section.musicItems.forEach((music) => refs.add(music.assetId));
 +      });
++
 +      for (const assetId of refs) {
 +        const meta = manifest.assetRegistry[assetId];
 +        if (!meta) {
@@ -5723,45 +5766,38 @@ index 0000000000000000000000000000000000000000..dced79fab108231f5d0cf5fb6ef2600d
 +  ipcMain.handle(
 +    'project:export',
 +    async (_event, { projectPath, manifest }: { projectPath: string; manifest: ProjectManifest }) => {
-+      const checks = await (async () => {
-+        const refs = new Set<string>();
-+        manifest.sections.forEach((section) => {
-+          section.timeline.forEach((item) => {
-+            if (item.type === 'slide' || item.type === 'video') refs.add(item.assetId);
-+            if (item.type === 'slide') item.dialogueItems.forEach((dialogue) => refs.add(dialogue.assetId));
-+            if (item.type === 'pageBreak') item.mediaGrid.forEach((tile) => refs.add(tile.assetId));
-+          });
-+          section.musicItems.forEach((music) => refs.add(music.assetId));
++      const refs = new Set<string>();
++      manifest.sections.forEach((section) => {
++        section.timeline.forEach((item) => {
++          if (item.type === 'slide' || item.type === 'video') refs.add(item.assetId);
++          if (item.type === 'slide') item.dialogueItems.forEach((dialogue) => refs.add(dialogue.assetId));
++          if (item.type === 'pageBreak') item.mediaGrid.forEach((tile) => refs.add(tile.assetId));
 +        });
-+        const list = [...refs];
-+        for (const assetId of list) {
-+          const meta = manifest.assetRegistry[assetId];
-+          if (!meta) {
-+            throw new Error(`Export failed: missing asset registry for ${assetId}`);
-+          }
-+          const filePath = path.join(projectPath, 'assets', `${assetId}.${meta.ext}`);
-+          const stat = await fs.stat(filePath);
-+          if (stat.size <= 0) {
-+            throw new Error(`Export failed: zero-byte asset ${assetId}`);
-+          }
-+        }
-+        return list.length;
-+      })();
++        section.musicItems.forEach((music) => refs.add(music.assetId));
++      });
++
++      const list = [...refs];
++      for (const assetId of list) {
++        const meta = manifest.assetRegistry[assetId];
++        if (!meta) throw new Error(`Export failed: missing asset registry for ${assetId}`);
++        const filePath = path.join(projectPath, 'assets', `${assetId}.${meta.ext}`);
++        const stat = await fs.stat(filePath);
++        if (stat.size <= 0) throw new Error(`Export failed: zero-byte asset ${assetId}`);
++      }
 +
 +      const result = await dialog.showSaveDialog({
 +        title: 'Export Teaching Studio Package',
 +        defaultPath: path.join(projectPath, 'export.tstudio')
 +      });
-+      if (result.canceled || !result.filePath) {
-+        throw new Error('Export cancelled');
-+      }
++      if (result.canceled || !result.filePath) throw new Error('Export cancelled');
++
 +      const exportPath = result.filePath;
 +      const tempPath = `${exportPath}.tmp`;
 +      await new Promise<void>((resolve, reject) => {
 +        const output = createWriteStream(tempPath);
 +        const archive = archiver('zip', { zlib: { level: 9 } });
 +        output.on('close', () => resolve());
-+        archive.on('error', (error) => reject(error));
++        archive.on('error', (error: Error) => reject(error));
 +        archive.pipe(output);
 +        archive.file(path.join(projectPath, 'manifest.json'), { name: 'manifest.json' });
 +        archive.directory(path.join(projectPath, 'assets'), 'assets');
@@ -5772,39 +5808,44 @@ index 0000000000000000000000000000000000000000..dced79fab108231f5d0cf5fb6ef2600d
 +      await fs.rename(tempPath, exportPath);
 +      const stat = await fs.stat(exportPath);
 +      const logPath = await writeLog(projectPath, `project:export ${exportPath}`);
-+      return { exportPath, size: stat.size, validatedAssets: checks, logPath };
++      return { exportPath, size: stat.size, validatedAssets: list.length, logPath };
 +    }
 +  );
 +
-+  ipcMain.handle('asset:path', async (_event, { projectPath, assetId, ext }) =>
-+    path.join(projectPath, 'assets', `${assetId}.${ext}`)
-+  );
++  // NOTE: renderer-only image loading uses IPC dataURL for secure, stable stage rendering.
++  ipcMain.handle('assets:readDataUrl', async (_event, { assetId }: { assetId: string }) => {
++    if (!projectContext.projectPath || !projectContext.manifest) {
++      throw new Error('No open project context for asset resolution');
++    }
++    const meta = projectContext.manifest.assetRegistry[assetId];
++    if (!meta) throw new Error(`Asset not found in registry: ${assetId}`);
++    const assetPath = path.join(projectContext.projectPath, 'assets', `${assetId}.${meta.ext}`);
++    const content = await fs.readFile(assetPath);
++    const mime = readMime(meta.ext);
++    return `data:${mime};base64,${content.toString('base64')}`;
++  });
 +
 +  app.on('activate', () => {
-+    if (BrowserWindow.getAllWindows().length === 0) {
-+      void createWindow();
-+    }
++    if (BrowserWindow.getAllWindows().length === 0) void createWindow();
 +  });
 +});
 +
 +app.on('window-all-closed', () => {
-+  if (process.platform !== 'darwin') {
-+    app.quit();
-+  }
++  if (process.platform !== 'darwin') app.quit();
 +});
 diff --git a/src/preload/index.ts b/src/preload/index.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..9eed68af56f48ec7eb6f24fd6685e6ed684d8c45
+index 0000000000000000000000000000000000000000..17f0c8450679fbd8c907ccfee79face2a066aa45
 --- /dev/null
 +++ b/src/preload/index.ts
-@@ -0,0 +1,21 @@
+@@ -0,0 +1,26 @@
 +import { contextBridge, ipcRenderer } from 'electron';
 +import type { ProjectManifest } from '../renderer/types/domain';
 +
-+const api = {
++const studioApi = {
 +  createProject: () => ipcRenderer.invoke('project:create'),
 +  openProject: () => ipcRenderer.invoke('project:open'),
-+  importAsset: (projectPath: string) => ipcRenderer.invoke('asset:import', { projectPath }),
++  importAssets: (projectPath: string) => ipcRenderer.invoke('asset:importMany', { projectPath }),
 +  saveManifest: (projectPath: string, manifest: ProjectManifest) =>
 +    ipcRenderer.invoke('project:save', { projectPath, manifest }),
 +  autosaveManifest: (projectPath: string, manifest: ProjectManifest) =>
@@ -5813,18 +5854,23 @@ index 0000000000000000000000000000000000000000..9eed68af56f48ec7eb6f24fd6685e6ed
 +  exportProject: (projectPath: string, manifest: ProjectManifest) =>
 +    ipcRenderer.invoke('project:export', { projectPath, manifest }),
 +  healthCheck: (projectPath: string, manifest: ProjectManifest) =>
-+    ipcRenderer.invoke('project:healthCheck', { projectPath, manifest }),
-+  getAssetPath: (projectPath: string, assetId: string, ext: string) =>
-+    ipcRenderer.invoke('asset:path', { projectPath, assetId, ext })
++    ipcRenderer.invoke('project:healthCheck', { projectPath, manifest })
 +};
 +
-+contextBridge.exposeInMainWorld('studioApi', api);
++const studio = {
++  assets: {
++    readDataUrl: (assetId: string) => ipcRenderer.invoke('assets:readDataUrl', { assetId })
++  }
++};
++
++contextBridge.exposeInMainWorld('studioApi', studioApi);
++contextBridge.exposeInMainWorld('studio', studio);
 diff --git a/src/renderer/core/timelinePlayer.ts b/src/renderer/core/timelinePlayer.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..00ebd9d9c094c66f4e2716c01d6d6d7126f12514
+index 0000000000000000000000000000000000000000..c2dcfdfe51d0b774138de2b7509283af75cce779
 --- /dev/null
 +++ b/src/renderer/core/timelinePlayer.ts
-@@ -0,0 +1,80 @@
+@@ -0,0 +1,111 @@
 +import type { Section, TimelineItem, TimelineMode } from '../types/domain';
 +
 +export class TimelinePlayer {
@@ -5833,13 +5879,13 @@ index 0000000000000000000000000000000000000000..00ebd9d9c094c66f4e2716c01d6d6d71
 +  private index = 0;
 +  private status: 'playing' | 'paused' | 'stopped' = 'stopped';
 +
-+  loadSection(sectionId: string, sections: Section[]): void {
++  loadSection(sectionId: string, sections: Section[], preserveIndex = false): void {
 +    const section = sections.find((item) => item.id === sectionId);
 +    if (!section) {
 +      throw new Error(`Section not found: ${sectionId}`);
 +    }
 +    this.section = section;
-+    this.index = 0;
++    this.index = preserveIndex ? Math.min(this.index, Math.max(0, section.timeline.length - 1)) : 0;
 +    this.status = 'stopped';
 +  }
 +
@@ -5861,24 +5907,21 @@ index 0000000000000000000000000000000000000000..00ebd9d9c094c66f4e2716c01d6d6d71
 +
 +  next(): TimelineItem | undefined {
 +    this.ensureSectionLoaded();
-+    if (!this.section) {
-+      return undefined;
-+    }
-+    this.index = Math.min(this.index + 1, Math.max(0, this.section.timeline.length - 1));
++    if (!this.section || this.section.timeline.length === 0) return undefined;
++    this.index = Math.min(this.index + 1, this.section.timeline.length - 1);
 +    return this.current();
 +  }
 +
 +  prev(): TimelineItem | undefined {
 +    this.ensureSectionLoaded();
++    if (!this.section || this.section.timeline.length === 0) return undefined;
 +    this.index = Math.max(0, this.index - 1);
 +    return this.current();
 +  }
 +
 +  goto(itemId: string): TimelineItem | undefined {
 +    this.ensureSectionLoaded();
-+    if (!this.section) {
-+      return undefined;
-+    }
++    if (!this.section) return undefined;
 +    const itemIndex = this.section.timeline.findIndex((item) => item.id === itemId);
 +    if (itemIndex >= 0) {
 +      this.index = itemIndex;
@@ -5887,12 +5930,46 @@ index 0000000000000000000000000000000000000000..00ebd9d9c094c66f4e2716c01d6d6d71
 +    throw new Error(`Item ${itemId} not found in active section`);
 +  }
 +
++  gotoIndex(index: number): TimelineItem | undefined {
++    this.ensureSectionLoaded();
++    if (!this.section || this.section.timeline.length === 0) return undefined;
++    this.index = Math.max(0, Math.min(index, this.section.timeline.length - 1));
++    return this.current();
++  }
++
++  first(): TimelineItem | undefined {
++    return this.gotoIndex(0);
++  }
++
++  last(): TimelineItem | undefined {
++    this.ensureSectionLoaded();
++    if (!this.section) return undefined;
++    return this.gotoIndex(this.section.timeline.length - 1);
++  }
++
++  nextPageBreak(): TimelineItem | undefined {
++    this.ensureSectionLoaded();
++    if (!this.section) return undefined;
++    const nextIndex = this.section.timeline.findIndex(
++      (item, idx) => idx > this.index && item.type === 'pageBreak'
++    );
++    if (nextIndex >= 0) {
++      this.index = nextIndex;
++      return this.current();
++    }
++    return undefined;
++  }
++
 +  setMode(mode: TimelineMode): void {
 +    this.mode = mode;
 +  }
 +
 +  current(): TimelineItem | undefined {
 +    return this.section?.timeline[this.index];
++  }
++
++  getIndex(): number {
++    return this.index;
 +  }
 +
 +  getState(): { mode: TimelineMode; status: string; index: number } {
@@ -6133,27 +6210,28 @@ index 0000000000000000000000000000000000000000..154633cc72348ba53eab17fc513fe9c2
 +}
 diff --git a/src/renderer/types/global.d.ts b/src/renderer/types/global.d.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..eca79518c4770d6819f360c32cd3a422df3ccc44
+index 0000000000000000000000000000000000000000..4f601a68ed7d031a6db420d8bcc8495cb755efea
 --- /dev/null
 +++ b/src/renderer/types/global.d.ts
-@@ -0,0 +1,40 @@
+@@ -0,0 +1,42 @@
 +import type { ProjectManifest } from './domain';
++
++type ImportedAsset = {
++  assetId: string;
++  ext: string;
++  mime: string;
++  originalFileName: string;
++  size: number;
++  hash: string;
++  assetPath: string;
++};
 +
 +declare global {
 +  interface Window {
 +    studioApi: {
 +      createProject: () => Promise<{ projectPath: string; manifest: ProjectManifest }>;
 +      openProject: () => Promise<{ projectPath: string; manifest: ProjectManifest }>;
-+      importAsset: (projectPath: string) => Promise<{
-+        assetId: string;
-+        ext: string;
-+        mime: string;
-+        originalFileName: string;
-+        size: number;
-+        hash: string;
-+        assetPath: string;
-+        thumbPath?: string;
-+      }>;
++      importAssets: (projectPath: string) => Promise<ImportedAsset[]>;
 +      saveManifest: (
 +        projectPath: string,
 +        manifest: ProjectManifest
@@ -6167,11 +6245,12 @@ index 0000000000000000000000000000000000000000..eca79518c4770d6819f360c32cd3a422
 +        projectPath: string,
 +        manifest: ProjectManifest
 +      ) => Promise<{ exportPath: string; size: number; validatedAssets: number; logPath: string }>;
-+      healthCheck: (
-+        projectPath: string,
-+        manifest: ProjectManifest
-+      ) => Promise<{ missing: string[] }>;
-+      getAssetPath: (projectPath: string, assetId: string, ext: string) => Promise<string>;
++      healthCheck: (projectPath: string, manifest: ProjectManifest) => Promise<{ missing: string[] }>;
++    };
++    studio: {
++      assets: {
++        readDataUrl: (assetId: string) => Promise<string>;
++      };
 +    };
 +  }
 +}
@@ -6179,25 +6258,25 @@ index 0000000000000000000000000000000000000000..eca79518c4770d6819f360c32cd3a422
 +export {};
 diff --git a/src/renderer/ui/App.tsx b/src/renderer/ui/App.tsx
 new file mode 100644
-index 0000000000000000000000000000000000000000..7f2a2d0dc38bc36c6bf1d7db58d729beb0e88988
+index 0000000000000000000000000000000000000000..00085a1467d3e44edf2eb7a43b93700a8e062155
 --- /dev/null
 +++ b/src/renderer/ui/App.tsx
-@@ -0,0 +1,335 @@
+@@ -0,0 +1,421 @@
 +import { useEffect, useMemo, useRef, useState } from 'react';
 +import { v4 as uuid } from 'uuid';
 +import { TimelinePlayer } from '../core/timelinePlayer';
 +import { AutopilotModule } from '../modules/AutopilotModule';
 +import { ModuleRegistry } from '../modules/registry';
 +import { TranslationModule } from '../modules/TranslationModule';
-+import { useStudioStore } from './store/studioStore';
 +import { autosaveProject, exportProject as exportProjectFile, saveProject as saveProjectFile } from '../persistence/projectClient';
-+import type { SlideItem } from '../types/domain';
++import type { SlideItem, TimelineItem } from '../types/domain';
++import { useStudioStore } from './store/studioStore';
 +
 +const moduleRegistry = new ModuleRegistry();
 +moduleRegistry.register(TranslationModule);
 +moduleRegistry.register(AutopilotModule);
 +
-+const autosaveEveryMs = 60000;
++const autosaveEveryMs = 30000;
 +
 +export function App() {
 +  const {
@@ -6205,17 +6284,21 @@ index 0000000000000000000000000000000000000000..7f2a2d0dc38bc36c6bf1d7db58d729be
 +    manifest,
 +    selectedSectionId,
 +    selectedItemId,
++    currentTimelineIndex,
++    assetDataUrlCache,
 +    status,
 +    healthIssues,
 +    lastSavedAt,
 +    lastAutosaveAt,
 +    setManifest,
++    hydrateRecovered,
 +    setStatus,
 +    addSection,
 +    renameSection,
 +    reorderSections,
 +    selectSection,
 +    selectItem,
++    setCurrentTimelineIndex,
 +    addTimelineItemAfterSelection,
 +    addPageBreak,
 +    updatePageBreak,
@@ -6224,11 +6307,13 @@ index 0000000000000000000000000000000000000000..7f2a2d0dc38bc36c6bf1d7db58d729be
 +    markSaved,
 +    markAutosaved,
 +    runHealthCheck,
-+    registerAsset
++    registerAsset,
++    cacheAssetDataUrl
 +  } = useStudioStore();
 +
 +  const [sectionDragIndex, setSectionDragIndex] = useState<number | null>(null);
 +  const [timelineDragIndex, setTimelineDragIndex] = useState<number | null>(null);
++  const [isPlaying, setIsPlaying] = useState(false);
 +  const playerRef = useRef(new TimelinePlayer());
 +  const dirtyRef = useRef(false);
 +
@@ -6236,7 +6321,33 @@ index 0000000000000000000000000000000000000000..7f2a2d0dc38bc36c6bf1d7db58d729be
 +    () => manifest.sections.find((item) => item.id === selectedSectionId) ?? manifest.sections[0],
 +    [manifest.sections, selectedSectionId]
 +  );
++
 +  const selectedItem = section?.timeline.find((item) => item.id === selectedItemId);
++
++  useEffect(() => {
++    if (!section) return;
++    try {
++      playerRef.current.loadSection(section.id, manifest.sections, true);
++      if (section.timeline.length && selectedItemId) {
++        playerRef.current.goto(selectedItemId);
++      } else if (section.timeline.length) {
++        const item = playerRef.current.first();
++        if (item) selectItem(item.id);
++      }
++    } catch (error) {
++      setStatus({ type: 'error', text: (error as Error).message });
++    }
++  }, [section?.id, manifest.sections, selectedItemId, selectItem, setStatus]);
++
++  useEffect(() => {
++    if (!selectedItem || selectedItem.type !== 'slide') return;
++    if (assetDataUrlCache[selectedItem.assetId]) return;
++    // NOTE: cache resolved image dataURLs to avoid repeated IPC reads while navigating.
++    void window.studio.assets
++      .readDataUrl(selectedItem.assetId)
++      .then((dataUrl) => cacheAssetDataUrl(selectedItem.assetId, dataUrl))
++      .catch((error: Error) => setStatus({ type: 'error', text: error.message }));
++  }, [assetDataUrlCache, cacheAssetDataUrl, selectedItem, setStatus]);
 +
 +  useEffect(() => {
 +    dirtyRef.current = true;
@@ -6250,7 +6361,7 @@ index 0000000000000000000000000000000000000000..7f2a2d0dc38bc36c6bf1d7db58d729be
 +      } catch (error) {
 +        setStatus({ type: 'error', text: (error as Error).message });
 +      }
-+    }, 1200);
++    }, 1500);
 +    return () => clearTimeout(handle);
 +  }, [manifest, projectPath, markAutosaved, setStatus]);
 +
@@ -6266,6 +6377,58 @@ index 0000000000000000000000000000000000000000..7f2a2d0dc38bc36c6bf1d7db58d729be
 +    }, autosaveEveryMs);
 +    return () => clearInterval(interval);
 +  }, [manifest, markAutosaved, projectPath, setStatus]);
++
++  const moveToItem = (item: TimelineItem | undefined) => {
++    if (!item) return;
++    selectItem(item.id);
++    setCurrentTimelineIndex(playerRef.current.getIndex());
++  };
++
++  const nav = (action: 'next' | 'prev' | 'first' | 'last' | 'nextPageBreak') => {
++    if (!section) return;
++    try {
++      let item: TimelineItem | undefined;
++      if (action === 'next') item = playerRef.current.next();
++      if (action === 'prev') item = playerRef.current.prev();
++      if (action === 'first') item = playerRef.current.first();
++      if (action === 'last') item = playerRef.current.last();
++      if (action === 'nextPageBreak') item = playerRef.current.nextPageBreak();
++      moveToItem(item);
++    } catch (error) {
++      setStatus({ type: 'error', text: (error as Error).message });
++    }
++  };
++
++  useEffect(() => {
++    const onKeyDown = (event: KeyboardEvent) => {
++      if (event.key === 'ArrowRight') {
++        event.preventDefault();
++        nav('next');
++      } else if (event.key === 'ArrowLeft') {
++        event.preventDefault();
++        nav('prev');
++      } else if (event.key === 'Home') {
++        event.preventDefault();
++        nav('first');
++      } else if (event.key === 'End') {
++        event.preventDefault();
++        nav('last');
++      } else if (event.key === ' ') {
++        event.preventDefault();
++        if (isPlaying) {
++          playerRef.current.pause();
++          setIsPlaying(false);
++        } else {
++          playerRef.current.play();
++          setIsPlaying(true);
++        }
++      }
++    };
++
++    // NOTE: window-level keyboard listener; does not require timeline focus.
++    window.addEventListener('keydown', onKeyDown);
++    return () => window.removeEventListener('keydown', onKeyDown);
++  }, [isPlaying]);
 +
 +  const createProject = async () => {
 +    try {
@@ -6302,7 +6465,9 @@ index 0000000000000000000000000000000000000000..7f2a2d0dc38bc36c6bf1d7db58d729be
 +    if (!projectPath) return;
 +    try {
 +      const result = await window.studioApi.recoverProject(projectPath);
-+      setManifest(projectPath, result.manifest);
++      // NOTE: explicit store hydration path for recovery and timeline index reset.
++      useStudioStore.setState((state) => ({ ...state }));
++      hydrateRecovered(projectPath, result.manifest);
 +      setStatus({ type: 'success', text: `Recovered from ${result.autosavePath}` });
 +    } catch (error) {
 +      setStatus({ type: 'error', text: (error as Error).message });
@@ -6322,29 +6487,36 @@ index 0000000000000000000000000000000000000000..7f2a2d0dc38bc36c6bf1d7db58d729be
 +    }
 +  };
 +
-+  const importAssetToTimeline = async () => {
++  const importSlides = async () => {
 +    if (!projectPath) return;
 +    try {
-+      const asset = await window.studioApi.importAsset(projectPath);
-+      registerAsset(asset.assetId, {
-+        ext: asset.ext,
-+        mime: asset.mime,
-+        originalFileName: asset.originalFileName,
-+        size: asset.size,
-+        hash: asset.hash
-+      });
-+      const slide: SlideItem = {
-+        id: uuid(),
-+        type: 'slide',
-+        assetId: asset.assetId,
-+        label: asset.originalFileName,
-+        transition: 'cut',
-+        durationMs: 10000,
-+        panDirection: 'none',
-+        dialogueItems: []
-+      };
-+      addTimelineItemAfterSelection(slide);
-+      setStatus({ type: 'success', text: `Imported asset ${asset.originalFileName} -> ${asset.assetPath}` });
++      const assets = await window.studioApi.importAssets(projectPath);
++      for (const asset of assets) {
++        registerAsset(asset.assetId, {
++          ext: asset.ext,
++          mime: asset.mime,
++          originalFileName: asset.originalFileName,
++          size: asset.size,
++          hash: asset.hash
++        });
++      }
++
++      let inserted = 0;
++      for (const asset of assets) {
++        const slide: SlideItem = {
++          id: uuid(),
++          type: 'slide',
++          assetId: asset.assetId,
++          label: asset.originalFileName,
++          transition: 'cut',
++          durationMs: 10000,
++          panDirection: 'none',
++          dialogueItems: []
++        };
++        addTimelineItemAfterSelection(slide);
++        inserted += 1;
++      }
++      setStatus({ type: 'success', text: `Imported ${inserted} slide(s)` });
 +    } catch (error) {
 +      setStatus({ type: 'error', text: (error as Error).message });
 +    }
@@ -6353,16 +6525,18 @@ index 0000000000000000000000000000000000000000..7f2a2d0dc38bc36c6bf1d7db58d729be
 +  const importMusic = async () => {
 +    if (!projectPath) return;
 +    try {
-+      const asset = await window.studioApi.importAsset(projectPath);
-+      registerAsset(asset.assetId, {
-+        ext: asset.ext,
-+        mime: asset.mime,
-+        originalFileName: asset.originalFileName,
-+        size: asset.size,
-+        hash: asset.hash
-+      });
-+      addMusicItem(asset.assetId, asset.originalFileName);
-+      setStatus({ type: 'success', text: `Imported music ${asset.originalFileName}` });
++      const assets = await window.studioApi.importAssets(projectPath);
++      for (const asset of assets) {
++        registerAsset(asset.assetId, {
++          ext: asset.ext,
++          mime: asset.mime,
++          originalFileName: asset.originalFileName,
++          size: asset.size,
++          hash: asset.hash
++        });
++        addMusicItem(asset.assetId, asset.originalFileName);
++      }
++      setStatus({ type: 'success', text: `Imported ${assets.length} music item(s)` });
 +    } catch (error) {
 +      setStatus({ type: 'error', text: (error as Error).message });
 +    }
@@ -6382,16 +6556,8 @@ index 0000000000000000000000000000000000000000..7f2a2d0dc38bc36c6bf1d7db58d729be
 +    }
 +  };
 +
-+  const nav = (direction: 'next' | 'prev') => {
-+    if (!section) return;
-+    try {
-+      playerRef.current.loadSection(section.id, manifest.sections);
-+      const item = direction === 'next' ? playerRef.current.next() : playerRef.current.prev();
-+      if (item) selectItem(item.id);
-+    } catch (error) {
-+      setStatus({ type: 'error', text: (error as Error).message });
-+    }
-+  };
++  const slideDataUrl =
++    selectedItem?.type === 'slide' ? assetDataUrlCache[selectedItem.assetId] : undefined;
 +
 +  return (
 +    <div className="app">
@@ -6402,12 +6568,13 @@ index 0000000000000000000000000000000000000000..7f2a2d0dc38bc36c6bf1d7db58d729be
 +        <button onClick={recoverProject}>Recover Autosave</button>
 +        <button onClick={exportProject}>Export .tstudio</button>
 +        <button onClick={checkHealth}>Health Check</button>
-+        <button onClick={importAssetToTimeline}>Import Slide</button>
++        <button onClick={importSlides}>Import Slide(s)</button>
 +        <button onClick={importMusic}>Import Music</button>
 +        <button onClick={addPageBreak}>Add PageBreak</button>
 +      </header>
 +      <div className="timestamps">
 +        <span>Project: {projectPath ?? 'none'}</span>
++        <span>Index: {currentTimelineIndex}</span>
 +        <span>Last Save: {lastSavedAt ?? 'n/a'}</span>
 +        <span>Last Autosave: {lastAutosaveAt ?? 'n/a'}</span>
 +      </div>
@@ -6441,10 +6608,13 @@ index 0000000000000000000000000000000000000000..7f2a2d0dc38bc36c6bf1d7db58d729be
 +              onDrop={() => {
 +                if (timelineDragIndex !== null) reorderTimeline(timelineDragIndex, index);
 +              }}
-+              onClick={() => selectItem(item.id)}
++              onClick={() => {
++                selectItem(item.id);
++                setCurrentTimelineIndex(index);
++              }}
 +              className={selectedItemId === item.id ? 'selected' : ''}
 +            >
-+              {item.type}: {item.type === 'pageBreak' ? item.title : item.label}
++              {index + 1}. {item.type}: {item.type === 'pageBreak' ? item.title : item.label}
 +            </div>
 +          ))}
 +        </aside>
@@ -6452,7 +6622,9 @@ index 0000000000000000000000000000000000000000..7f2a2d0dc38bc36c6bf1d7db58d729be
 +          <h3>Viewer Stage (OBS)</h3>
 +          <div className="stage">
 +            {selectedItem ? (
-+              selectedItem.type === 'pageBreak' ? (
++              selectedItem.type === 'slide' ? (
++                slideDataUrl ? <img src={slideDataUrl} alt={selectedItem.label} className="slide-img" /> : <p>Loading image…</p>
++              ) : selectedItem.type === 'pageBreak' ? (
 +                <div>
 +                  <h2>{selectedItem.title}</h2>
 +                  <p>{selectedItem.questionsText}</p>
@@ -6470,14 +6642,7 @@ index 0000000000000000000000000000000000000000..7f2a2d0dc38bc36c6bf1d7db58d729be
 +          <div className="controls">
 +            <button onClick={() => nav('prev')}>Prev</button>
 +            <button onClick={() => nav('next')}>Next</button>
-+            <button
-+              onClick={() => {
-+                const breakItem = section?.timeline.find((item) => item.type === 'pageBreak');
-+                if (breakItem) selectItem(breakItem.id);
-+              }}
-+            >
-+              Jump PageBreak
-+            </button>
++            <button onClick={() => nav('nextPageBreak')}>Jump Next PageBreak</button>
 +          </div>
 +        </section>
 +        <aside>
@@ -6520,10 +6685,10 @@ index 0000000000000000000000000000000000000000..7f2a2d0dc38bc36c6bf1d7db58d729be
 +}
 diff --git a/src/renderer/ui/store/studioStore.ts b/src/renderer/ui/store/studioStore.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..f80e7a797c18543f198b1d4e21b29b5b7d21dd8b
+index 0000000000000000000000000000000000000000..2638431e86829e38d7a092cd731b224b657d97a2
 --- /dev/null
 +++ b/src/renderer/ui/store/studioStore.ts
-@@ -0,0 +1,210 @@
+@@ -0,0 +1,251 @@
 +import { create } from 'zustand';
 +import { v4 as uuid } from 'uuid';
 +import type { PageBreakItem, ProjectManifest, Section, TimelineItem } from '../../types/domain';
@@ -6539,17 +6704,21 @@ index 0000000000000000000000000000000000000000..f80e7a797c18543f198b1d4e21b29b5b
 +  manifest: ProjectManifest;
 +  selectedSectionId?: string;
 +  selectedItemId?: string;
++  currentTimelineIndex: number;
++  assetDataUrlCache: Record<string, string>;
 +  lastSavedAt?: string;
 +  lastAutosaveAt?: string;
 +  status?: StatusMessage;
 +  healthIssues: string[];
 +  setStatus: (status: StatusMessage) => void;
 +  setManifest: (projectPath: string, manifest: ProjectManifest) => void;
++  hydrateRecovered: (projectPath: string, manifest: ProjectManifest) => void;
 +  addSection: () => void;
 +  renameSection: (id: string, title: string) => void;
 +  reorderSections: (sourceIndex: number, targetIndex: number) => void;
 +  selectSection: (sectionId: string) => void;
 +  selectItem: (itemId?: string) => void;
++  setCurrentTimelineIndex: (index: number) => void;
 +  addTimelineItemAfterSelection: (item: TimelineItem) => void;
 +  addPageBreak: () => void;
 +  updatePageBreak: (id: string, patch: Partial<PageBreakItem>) => void;
@@ -6559,29 +6728,20 @@ index 0000000000000000000000000000000000000000..f80e7a797c18543f198b1d4e21b29b5b
 +  markAutosaved: (at: string) => void;
 +  runHealthCheck: () => void;
 +  registerAsset: (assetId: string, meta: ProjectManifest['assetRegistry'][string]) => void;
++  cacheAssetDataUrl: (assetId: string, dataUrl: string) => void;
 +}
 +
 +const blankManifest = (): ProjectManifest => ({
 +  schemaVersion: 1,
 +  createdAt: new Date().toISOString(),
 +  updatedAt: new Date().toISOString(),
-+  sections: [
-+    {
-+      id: uuid(),
-+      title: 'Section 1',
-+      order: 0,
-+      musicItems: [],
-+      timeline: []
-+    }
-+  ],
++  sections: [{ id: uuid(), title: 'Section 1', order: 0, musicItems: [], timeline: [] }],
 +  assetRegistry: {}
 +});
 +
 +function withSelectedSection(manifest: ProjectManifest, sectionId?: string): Section {
 +  const section = manifest.sections.find((item) => item.id === sectionId) ?? manifest.sections[0];
-+  if (!section) {
-+    throw new Error('No section available');
-+  }
++  if (!section) throw new Error('No section available');
 +  return section;
 +}
 +
@@ -6589,16 +6749,33 @@ index 0000000000000000000000000000000000000000..f80e7a797c18543f198b1d4e21b29b5b
 +  manifest: blankManifest(),
 +  selectedSectionId: undefined,
 +  selectedItemId: undefined,
++  currentTimelineIndex: 0,
++  assetDataUrlCache: {},
 +  healthIssues: [],
 +  setStatus: (status) => set({ status }),
-+  setManifest: (projectPath, manifest) =>
++  setManifest: (projectPath, manifest) => {
++    const firstSectionId = manifest.sections[0]?.id;
++    const firstItemId = manifest.sections[0]?.timeline[0]?.id;
 +    set({
 +      projectPath,
 +      manifest,
-+      selectedSectionId: manifest.sections[0]?.id,
-+      selectedItemId: undefined,
++      selectedSectionId: firstSectionId,
++      selectedItemId: firstItemId,
++      currentTimelineIndex: firstItemId ? 0 : 0,
 +      healthIssues: validateManifest(manifest)
-+    }),
++    });
++  },
++  hydrateRecovered: (projectPath, manifest) => {
++    const firstSection = manifest.sections[0];
++    set({
++      projectPath,
++      manifest,
++      selectedSectionId: firstSection?.id,
++      selectedItemId: firstSection?.timeline[0]?.id,
++      currentTimelineIndex: 0,
++      healthIssues: validateManifest(manifest)
++    });
++  },
 +  addSection: () =>
 +    set((state) => {
 +      const section = {
@@ -6614,7 +6791,9 @@ index 0000000000000000000000000000000000000000..f80e7a797c18543f198b1d4e21b29b5b
 +          updatedAt: new Date().toISOString(),
 +          sections: [...state.manifest.sections, section]
 +        },
-+        selectedSectionId: section.id
++        selectedSectionId: section.id,
++        selectedItemId: undefined,
++        currentTimelineIndex: 0
 +      };
 +    }),
 +  renameSection: (id, title) =>
@@ -6638,8 +6817,33 @@ index 0000000000000000000000000000000000000000..f80e7a797c18543f198b1d4e21b29b5b
 +        }
 +      };
 +    }),
-+  selectSection: (selectedSectionId) => set({ selectedSectionId, selectedItemId: undefined }),
-+  selectItem: (selectedItemId) => set({ selectedItemId }),
++  selectSection: (selectedSectionId) =>
++    set((state) => {
++      const section = state.manifest.sections.find((item) => item.id === selectedSectionId);
++      return {
++        selectedSectionId,
++        selectedItemId: section?.timeline[0]?.id,
++        currentTimelineIndex: 0
++      };
++    }),
++  selectItem: (selectedItemId) =>
++    set((state) => {
++      const section = withSelectedSection(state.manifest, state.selectedSectionId);
++      const index = section.timeline.findIndex((item) => item.id === selectedItemId);
++      return {
++        selectedItemId,
++        currentTimelineIndex: index >= 0 ? index : state.currentTimelineIndex
++      };
++    }),
++  setCurrentTimelineIndex: (currentTimelineIndex) =>
++    set((state) => {
++      const section = withSelectedSection(state.manifest, state.selectedSectionId);
++      const clamped = Math.max(0, Math.min(currentTimelineIndex, Math.max(0, section.timeline.length - 1)));
++      return {
++        currentTimelineIndex: clamped,
++        selectedItemId: section.timeline[clamped]?.id
++      };
++    }),
 +  addTimelineItemAfterSelection: (item) =>
 +    set((state) => {
 +      const section = withSelectedSection(state.manifest, state.selectedSectionId);
@@ -6655,7 +6859,8 @@ index 0000000000000000000000000000000000000000..f80e7a797c18543f198b1d4e21b29b5b
 +            value.id === section.id ? { ...value, timeline } : value
 +          )
 +        },
-+        selectedItemId: item.id
++        selectedItemId: item.id,
++        currentTimelineIndex: insertAt
 +      };
 +    }),
 +  addPageBreak: () => {
@@ -6695,7 +6900,9 @@ index 0000000000000000000000000000000000000000..f80e7a797c18543f198b1d4e21b29b5b
 +          sections: state.manifest.sections.map((item) =>
 +            item.id === section.id ? { ...item, timeline } : item
 +          )
-+        }
++        },
++        currentTimelineIndex: target,
++        selectedItemId: timeline[target]?.id
 +      };
 +    }),
 +  addMusicItem: (assetId, label) =>
@@ -6709,10 +6916,7 @@ index 0000000000000000000000000000000000000000..f80e7a797c18543f198b1d4e21b29b5b
 +            entry.id === section.id
 +              ? {
 +                  ...entry,
-+                  musicItems: [
-+                    ...entry.musicItems,
-+                    { id: uuid(), assetId, label, loop: true, volume: 1 }
-+                  ]
++                  musicItems: [...entry.musicItems, { id: uuid(), assetId, label, loop: true, volume: 1 }]
 +                }
 +              : entry
 +          )
@@ -6729,6 +6933,8 @@ index 0000000000000000000000000000000000000000..f80e7a797c18543f198b1d4e21b29b5b
 +        assetRegistry: { ...state.manifest.assetRegistry, [assetId]: meta }
 +      }
 +    })),
++  cacheAssetDataUrl: (assetId, dataUrl) =>
++    set((state) => ({ assetDataUrlCache: { ...state.assetDataUrlCache, [assetId]: dataUrl } })),
 +  runHealthCheck: () => {
 +    const manifest = get().manifest;
 +    set({ healthIssues: validateManifest(manifest) });
@@ -6736,10 +6942,10 @@ index 0000000000000000000000000000000000000000..f80e7a797c18543f198b1d4e21b29b5b
 +}));
 diff --git a/src/renderer/ui/styles.css b/src/renderer/ui/styles.css
 new file mode 100644
-index 0000000000000000000000000000000000000000..d6d7a070e4b32d2dc6241cc304e22aa60424e8bc
+index 0000000000000000000000000000000000000000..caf705abc912f209e98a8a9e6dd6337fc877dc42
 --- /dev/null
 +++ b/src/renderer/ui/styles.css
-@@ -0,0 +1,13 @@
+@@ -0,0 +1,15 @@
 +body { margin: 0; font-family: Arial, sans-serif; }
 +.app { display: flex; flex-direction: column; height: 100vh; }
 +header { display: flex; gap: 8px; padding: 8px; border-bottom: 1px solid #ddd; flex-wrap: wrap; }
@@ -6753,6 +6959,8 @@ index 0000000000000000000000000000000000000000..d6d7a070e4b32d2dc6241cc304e22aa6
 +.status.error { background: #ffdddd; }
 +.status.info { background: #e5f0ff; }
 +.controls { margin-top: 10px; display: flex; gap: 8px; }
++
++.slide-img { max-width: 100%; max-height: 100%; object-fit: contain; }
 diff --git a/tsconfig.electron.json b/tsconfig.electron.json
 new file mode 100644
 index 0000000000000000000000000000000000000000..980ce51b436279098d72c340fffc07f503135208
