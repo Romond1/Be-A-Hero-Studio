@@ -1,0 +1,13 @@
+body { margin: 0; font-family: Arial, sans-serif; }
+.app { display: flex; flex-direction: column; height: 100vh; }
+header { display: flex; gap: 8px; padding: 8px; border-bottom: 1px solid #ddd; flex-wrap: wrap; }
+.timestamps { display:flex; gap: 12px; font-size: 12px; padding: 4px 8px; }
+main { display: grid; grid-template-columns: 300px 1fr 320px; gap: 10px; padding: 10px; flex: 1; }
+aside, .viewer { border: 1px solid #ddd; padding: 8px; overflow: auto; }
+.stage { border: 1px dashed #aaa; height: 70%; display:flex; align-items:center; justify-content:center; }
+.selected { background: #def; }
+.status { margin: 0 8px 8px; padding: 6px; }
+.status.success { background: #def7de; }
+.status.error { background: #ffdddd; }
+.status.info { background: #e5f0ff; }
+.controls { margin-top: 10px; display: flex; gap: 8px; }
