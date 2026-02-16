@@ -7,9 +7,17 @@
     "skipLibCheck": true,
     "outDir": "dist-electron",
     "rootDir": "src",
-    "types": ["node", "electron"],
+    "types": [
+      "node",
+      "electron"
+    ],
     "esModuleInterop": true,
     "resolveJsonModule": true
   },
-  "include": ["src/main", "src/preload", "src/renderer/types"]
+  "include": [
+    "src/main",
+    "src/preload",
+    "src/renderer/types",
+    "src/shared"
+  ]
 }

@@ -4,7 +4,11 @@ import { TimelinePlayer } from '../core/timelinePlayer';
 import { AutopilotModule } from '../modules/AutopilotModule';
 import { ModuleRegistry } from '../modules/registry';
 import { TranslationModule } from '../modules/TranslationModule';
-import { autosaveProject, exportProject as exportProjectFile, saveProject as saveProjectFile } from '../persistence/projectClient';
+import {
+  autosaveProject,
+  exportProject as exportProjectFile,
+  saveProject as saveProjectFile
+} from '../persistence/projectClient';
 import type { SlideItem, TimelineItem } from '../types/domain';
 import { useStudioStore } from './store/studioStore';
 
@@ -13,6 +17,15 @@ moduleRegistry.register(TranslationModule);
 moduleRegistry.register(AutopilotModule);
 
 const autosaveEveryMs = 30000;
+
+function formatBuildTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(
+    date.getMinutes()
+  )}`;
+}
 
 export function App() {
   const {
@@ -53,6 +66,10 @@ export function App() {
   const playerRef = useRef(new TimelinePlayer());
   const dirtyRef = useRef(false);
 
+  const build = window.studioApi.buildInfo;
+  const diagnosticsApiKeys = Object.keys(window.studioApi);
+  const hasReadDataUrl = typeof window.studioApi.assets?.readDataUrl === 'function';
+
   const section = useMemo(
     () => manifest.sections.find((item) => item.id === selectedSectionId) ?? manifest.sections[0],
     [manifest.sections, selectedSectionId]
@@ -63,12 +80,12 @@ export function App() {
   useEffect(() => {
     if (!section) return;
     try {
-      playerRef.current.loadSection(section.id, manifest.sections, true);
-      if (section.timeline.length && selectedItemId) {
+      playerRef.current.loadSection(section.id, manifest.sections);
+      if (selectedItemId) {
         playerRef.current.goto(selectedItemId);
-      } else if (section.timeline.length) {
-        const item = playerRef.current.first();
-        if (item) selectItem(item.id);
+      } else {
+        const first = playerRef.current.first();
+        if (first) selectItem(first.id);
       }
     } catch (error) {
       setStatus({ type: 'error', text: (error as Error).message });
@@ -76,14 +93,20 @@ export function App() {
   }, [section?.id, manifest.sections, selectedItemId, selectItem, setStatus]);
 
   useEffect(() => {
-    if (!selectedItem || selectedItem.type !== 'slide') return;
+    if (!selectedItem || selectedItem.type !== 'slide' || !projectPath) return;
     if (assetDataUrlCache[selectedItem.assetId]) return;
-    // NOTE: cache resolved image dataURLs to avoid repeated IPC reads while navigating.
-    void window.studio.assets
-      .readDataUrl(selectedItem.assetId)
-      .then((dataUrl) => cacheAssetDataUrl(selectedItem.assetId, dataUrl))
-      .catch((error: Error) => setStatus({ type: 'error', text: error.message }));
-  }, [assetDataUrlCache, cacheAssetDataUrl, selectedItem, setStatus]);
+
+    void window.studioApi.assets
+      .readDataUrl(projectPath, selectedItem.assetId)
+      .then((dataUrl) => {
+        cacheAssetDataUrl(selectedItem.assetId, dataUrl);
+        console.info(`[renderer:readDataUrl] assetId=${selectedItem.assetId} success=true`);
+      })
+      .catch((error: Error) => {
+        console.error(`[renderer:readDataUrl] assetId=${selectedItem.assetId} success=false ${error.message}`);
+        setStatus({ type: 'error', text: error.message });
+      });
+  }, [assetDataUrlCache, cacheAssetDataUrl, selectedItem, projectPath, setStatus]);
 
   useEffect(() => {
     dirtyRef.current = true;
@@ -118,6 +141,7 @@ export function App() {
     if (!item) return;
     selectItem(item.id);
     setCurrentTimelineIndex(playerRef.current.getIndex());
+    console.info(`[timeline-nav] index=${playerRef.current.getIndex()} itemId=${item.id}`);
   };
 
   const nav = (action: 'next' | 'prev' | 'first' | 'last' | 'nextPageBreak') => {
@@ -161,7 +185,6 @@ export function App() {
       }
     };
 
-    // NOTE: window-level keyboard listener; does not require timeline focus.
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [isPlaying]);
@@ -201,8 +224,6 @@ export function App() {
     if (!projectPath) return;
     try {
       const result = await window.studioApi.recoverProject(projectPath);
-      // NOTE: explicit store hydration path for recovery and timeline index reset.
-      useStudioStore.setState((state) => ({ ...state }));
       hydrateRecovered(projectPath, result.manifest);
       setStatus({ type: 'success', text: `Recovered from ${result.autosavePath}` });
     } catch (error) {
@@ -297,6 +318,9 @@ export function App() {
 
   return (
     <div className="app">
+      <div className="build-banner">
+        BUILD {build.buildHash} | v{build.version} | {formatBuildTime(build.buildTime)}
+      </div>
       <header>
         <button onClick={createProject}>Create Project</button>
         <button onClick={openProject}>Open</button>
@@ -304,9 +328,10 @@ export function App() {
         <button onClick={recoverProject}>Recover Autosave</button>
         <button onClick={exportProject}>Export .tstudio</button>
         <button onClick={checkHealth}>Health Check</button>
-        <button onClick={importSlides}>Import Slide(s)</button>
+        <button onClick={importSlides}>Import Slides</button>
         <button onClick={importMusic}>Import Music</button>
         <button onClick={addPageBreak}>Add PageBreak</button>
+        {import.meta.env.DEV && <button onClick={() => void window.studioApi.simulateCrash()}>Simulate Crash</button>}
       </header>
       <div className="timestamps">
         <span>Project: {projectPath ?? 'none'}</span>
@@ -347,6 +372,8 @@ export function App() {
               onClick={() => {
                 selectItem(item.id);
                 setCurrentTimelineIndex(index);
+                playerRef.current.gotoIndex(index);
+                console.info(`[timeline-click] index=${index} itemId=${item.id}`);
               }}
               className={selectedItemId === item.id ? 'selected' : ''}
             >
@@ -359,7 +386,11 @@ export function App() {
           <div className="stage">
             {selectedItem ? (
               selectedItem.type === 'slide' ? (
-                slideDataUrl ? <img src={slideDataUrl} alt={selectedItem.label} className="slide-img" /> : <p>Loading image…</p>
+                slideDataUrl ? (
+                  <img src={slideDataUrl} alt={selectedItem.label} className="slide-img" />
+                ) : (
+                  <p>Loading image…</p>
+                )
               ) : selectedItem.type === 'pageBreak' ? (
                 <div>
                   <h2>{selectedItem.title}</h2>
@@ -382,6 +413,9 @@ export function App() {
           </div>
         </section>
         <aside>
+          <h3>Diagnostics</h3>
+          <div>studioApi keys: {diagnosticsApiKeys.join(', ')}</div>
+          <div>assets.readDataUrl exists: {String(hasReadDataUrl)}</div>
           <h3>Properties</h3>
           {selectedItem?.type === 'pageBreak' && (
             <>

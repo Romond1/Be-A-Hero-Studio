@@ -10,9 +10,16 @@ type ImportedAsset = {
   assetPath: string;
 };
 
+type BuildInfo = {
+  version: string;
+  buildHash: string;
+  buildTime: string;
+};
+
 declare global {
   interface Window {
     studioApi: {
+      buildInfo: BuildInfo;
       createProject: () => Promise<{ projectPath: string; manifest: ProjectManifest }>;
       openProject: () => Promise<{ projectPath: string; manifest: ProjectManifest }>;
       importAssets: (projectPath: string) => Promise<ImportedAsset[]>;
@@ -30,11 +37,10 @@ declare global {
         manifest: ProjectManifest
       ) => Promise<{ exportPath: string; size: number; validatedAssets: number; logPath: string }>;
       healthCheck: (projectPath: string, manifest: ProjectManifest) => Promise<{ missing: string[] }>;
-    };
-    studio: {
       assets: {
-        readDataUrl: (assetId: string) => Promise<string>;
+        readDataUrl: (projectPath: string, assetId: string) => Promise<string>;
       };
+      simulateCrash: () => Promise<boolean>;
     };
   }
 }

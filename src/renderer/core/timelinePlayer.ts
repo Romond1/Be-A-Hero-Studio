@@ -6,14 +6,28 @@ export class TimelinePlayer {
   private index = 0;
   private status: 'playing' | 'paused' | 'stopped' = 'stopped';
 
-  loadSection(sectionId: string, sections: Section[], preserveIndex = false): void {
+  loadSection(sectionId: string, sections: Section[]): void {
     const section = sections.find((item) => item.id === sectionId);
     if (!section) {
       throw new Error(`Section not found: ${sectionId}`);
     }
+
+    const sectionChanged = this.section?.id !== section.id;
     this.section = section;
-    this.index = preserveIndex ? Math.min(this.index, Math.max(0, section.timeline.length - 1)) : 0;
-    this.status = 'stopped';
+
+    // Do not reset index on every navigation refresh; only when section changes.
+    if (sectionChanged) {
+      this.index = 0;
+      this.status = 'stopped';
+      return;
+    }
+
+    if (section.timeline.length === 0) {
+      this.index = 0;
+      return;
+    }
+
+    this.index = Math.min(this.index, section.timeline.length - 1);
   }
 
   play(): void {

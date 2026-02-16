@@ -62,6 +62,17 @@ function setProjectContext(projectPath: string, manifest: ProjectManifest): void
   projectContext.manifest = manifest;
 }
 
+function isManifestLike(input: unknown): input is ProjectManifest {
+  if (!input || typeof input !== 'object') return false;
+  const manifest = input as ProjectManifest;
+  return (
+    Array.isArray(manifest.sections) &&
+    !!manifest.assetRegistry &&
+    typeof manifest.assetRegistry === 'object' &&
+    typeof manifest.schemaVersion === 'number'
+  );
+}
+
 async function importFileIntoProject(projectPath: string, sourcePath: string) {
   const stat = await fs.stat(sourcePath);
   const ext = path.extname(sourcePath).replace('.', '').toLowerCase();
@@ -124,7 +135,6 @@ app.whenReady().then(() => {
     return { projectPath, manifest };
   });
 
-  // NOTE: multi-select import for stable bulk slide insertion.
   ipcMain.handle('asset:importMany', async (_event, { projectPath }: { projectPath: string }) => {
     const result = await dialog.showOpenDialog({ properties: ['openFile', 'multiSelections'] });
     if (result.canceled || !result.filePaths.length) throw new Error('Asset import cancelled');
@@ -175,32 +185,39 @@ app.whenReady().then(() => {
     }
   );
 
-  // NOTE: recovery chooses newest autosave on disk, not only autosave_latest.
   ipcMain.handle('project:recover', async (_event, { projectPath }: { projectPath: string }) => {
     const autosaveDir = path.join(projectPath, 'autosave');
     const entries = await fs.readdir(autosaveDir);
     const candidates = entries.filter((name) => name.startsWith('autosave_') && name.endsWith('.json'));
     if (!candidates.length) throw new Error('No autosave files found for recovery');
 
-    let latestFile = '';
-    let latestMtime = 0;
-    for (const candidate of candidates) {
-      const fullPath = path.join(autosaveDir, candidate);
-      const stat = await fs.stat(fullPath);
-      if (stat.mtimeMs > latestMtime) {
-        latestMtime = stat.mtimeMs;
-        latestFile = fullPath;
+    const filesWithTimes = await Promise.all(
+      candidates.map(async (name) => {
+        const fullPath = path.join(autosaveDir, name);
+        const stat = await fs.stat(fullPath);
+        return { fullPath, mtimeMs: stat.mtimeMs };
+      })
+    );
+
+    filesWithTimes.sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+    for (const candidate of filesWithTimes) {
+      try {
+        const data = await fs.readFile(candidate.fullPath, 'utf-8');
+        const parsed = JSON.parse(data);
+        if (!isManifestLike(parsed)) {
+          throw new Error('autosave schema invalid');
+        }
+        const manifest = parsed as ProjectManifest;
+        setProjectContext(projectPath, manifest);
+        await writeLog(projectPath, `project:recover ${candidate.fullPath}`);
+        return { manifest, autosavePath: candidate.fullPath };
+      } catch {
+        // Keep scanning for newest valid snapshot.
       }
     }
 
-    const data = await fs.readFile(latestFile, 'utf-8');
-    const manifest = JSON.parse(data) as ProjectManifest;
-    if (!manifest.sections || !Array.isArray(manifest.sections)) {
-      throw new Error(`Invalid autosave format at ${latestFile}`);
-    }
-    setProjectContext(projectPath, manifest);
-    await writeLog(projectPath, `project:recover ${latestFile}`);
-    return { manifest, autosavePath: latestFile };
+    throw new Error('No valid autosave snapshot found for recovery');
   });
 
   ipcMain.handle(
@@ -284,17 +301,42 @@ app.whenReady().then(() => {
     }
   );
 
-  // NOTE: renderer-only image loading uses IPC dataURL for secure, stable stage rendering.
-  ipcMain.handle('assets:readDataUrl', async (_event, { assetId }: { assetId: string }) => {
-    if (!projectContext.projectPath || !projectContext.manifest) {
-      throw new Error('No open project context for asset resolution');
+  ipcMain.handle(
+    'assets:readDataUrl',
+    async (_event, { projectPath, assetId }: { projectPath?: string; assetId: string }) => {
+      try {
+        const activeProjectPath = projectPath ?? projectContext.projectPath;
+        if (!activeProjectPath) {
+          throw new Error('No open project path for asset resolution');
+        }
+
+        let activeManifest = projectContext.manifest;
+        if (!activeManifest || projectContext.projectPath !== activeProjectPath) {
+          const manifestText = await fs.readFile(path.join(activeProjectPath, 'manifest.json'), 'utf-8');
+          const manifest = JSON.parse(manifestText) as ProjectManifest;
+          setProjectContext(activeProjectPath, manifest);
+          activeManifest = manifest;
+        }
+
+        const meta = activeManifest.assetRegistry[assetId];
+        if (!meta) throw new Error(`Asset not found in registry: ${assetId}`);
+        const assetPath = path.join(activeProjectPath, 'assets', `${assetId}.${meta.ext}`);
+        const content = await fs.readFile(assetPath);
+        const mime = readMime(meta.ext);
+        console.info(`[assets:readDataUrl] assetId=${assetId} mime=${mime} bytes=${content.length} success=true`);
+        return `data:${mime};base64,${content.toString('base64')}`;
+      } catch (error) {
+        console.error(
+          `[assets:readDataUrl] assetId=${assetId} success=false error=${(error as Error).message}`
+        );
+        throw error;
+      }
     }
-    const meta = projectContext.manifest.assetRegistry[assetId];
-    if (!meta) throw new Error(`Asset not found in registry: ${assetId}`);
-    const assetPath = path.join(projectContext.projectPath, 'assets', `${assetId}.${meta.ext}`);
-    const content = await fs.readFile(assetPath);
-    const mime = readMime(meta.ext);
-    return `data:${mime};base64,${content.toString('base64')}`;
+  );
+
+  ipcMain.handle('app:simulateCrash', async () => {
+    app.exit(99);
+    return true;
   });
 
   app.on('activate', () => {
