@@ -5522,10 +5522,10 @@ index 0000000000000000000000000000000000000000..ac765b8311a34cf580809eafe16fca9c
 +}
 diff --git a/src/main/index.ts b/src/main/index.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..c10b4f1dd1e4a0c9a82d5e6f985622dc3fc2bb7c
+index 0000000000000000000000000000000000000000..96063e0f5a43498490e335c580b9ce1893cdf261
 --- /dev/null
 +++ b/src/main/index.ts
-@@ -0,0 +1,307 @@
+@@ -0,0 +1,349 @@
 +import { app, BrowserWindow, dialog, ipcMain } from 'electron';
 +import { createHash } from 'node:crypto';
 +import { createWriteStream } from 'node:fs';
@@ -5590,6 +5590,17 @@ index 0000000000000000000000000000000000000000..c10b4f1dd1e4a0c9a82d5e6f985622dc
 +  projectContext.manifest = manifest;
 +}
 +
++function isManifestLike(input: unknown): input is ProjectManifest {
++  if (!input || typeof input !== 'object') return false;
++  const manifest = input as ProjectManifest;
++  return (
++    Array.isArray(manifest.sections) &&
++    !!manifest.assetRegistry &&
++    typeof manifest.assetRegistry === 'object' &&
++    typeof manifest.schemaVersion === 'number'
++  );
++}
++
 +async function importFileIntoProject(projectPath: string, sourcePath: string) {
 +  const stat = await fs.stat(sourcePath);
 +  const ext = path.extname(sourcePath).replace('.', '').toLowerCase();
@@ -5652,7 +5663,6 @@ index 0000000000000000000000000000000000000000..c10b4f1dd1e4a0c9a82d5e6f985622dc
 +    return { projectPath, manifest };
 +  });
 +
-+  // NOTE: multi-select import for stable bulk slide insertion.
 +  ipcMain.handle('asset:importMany', async (_event, { projectPath }: { projectPath: string }) => {
 +    const result = await dialog.showOpenDialog({ properties: ['openFile', 'multiSelections'] });
 +    if (result.canceled || !result.filePaths.length) throw new Error('Asset import cancelled');
@@ -5703,32 +5713,39 @@ index 0000000000000000000000000000000000000000..c10b4f1dd1e4a0c9a82d5e6f985622dc
 +    }
 +  );
 +
-+  // NOTE: recovery chooses newest autosave on disk, not only autosave_latest.
 +  ipcMain.handle('project:recover', async (_event, { projectPath }: { projectPath: string }) => {
 +    const autosaveDir = path.join(projectPath, 'autosave');
 +    const entries = await fs.readdir(autosaveDir);
 +    const candidates = entries.filter((name) => name.startsWith('autosave_') && name.endsWith('.json'));
 +    if (!candidates.length) throw new Error('No autosave files found for recovery');
 +
-+    let latestFile = '';
-+    let latestMtime = 0;
-+    for (const candidate of candidates) {
-+      const fullPath = path.join(autosaveDir, candidate);
-+      const stat = await fs.stat(fullPath);
-+      if (stat.mtimeMs > latestMtime) {
-+        latestMtime = stat.mtimeMs;
-+        latestFile = fullPath;
++    const filesWithTimes = await Promise.all(
++      candidates.map(async (name) => {
++        const fullPath = path.join(autosaveDir, name);
++        const stat = await fs.stat(fullPath);
++        return { fullPath, mtimeMs: stat.mtimeMs };
++      })
++    );
++
++    filesWithTimes.sort((a, b) => b.mtimeMs - a.mtimeMs);
++
++    for (const candidate of filesWithTimes) {
++      try {
++        const data = await fs.readFile(candidate.fullPath, 'utf-8');
++        const parsed = JSON.parse(data);
++        if (!isManifestLike(parsed)) {
++          throw new Error('autosave schema invalid');
++        }
++        const manifest = parsed as ProjectManifest;
++        setProjectContext(projectPath, manifest);
++        await writeLog(projectPath, `project:recover ${candidate.fullPath}`);
++        return { manifest, autosavePath: candidate.fullPath };
++      } catch {
++        // Keep scanning for newest valid snapshot.
 +      }
 +    }
 +
-+    const data = await fs.readFile(latestFile, 'utf-8');
-+    const manifest = JSON.parse(data) as ProjectManifest;
-+    if (!manifest.sections || !Array.isArray(manifest.sections)) {
-+      throw new Error(`Invalid autosave format at ${latestFile}`);
-+    }
-+    setProjectContext(projectPath, manifest);
-+    await writeLog(projectPath, `project:recover ${latestFile}`);
-+    return { manifest, autosavePath: latestFile };
++    throw new Error('No valid autosave snapshot found for recovery');
 +  });
 +
 +  ipcMain.handle(
@@ -5812,17 +5829,42 @@ index 0000000000000000000000000000000000000000..c10b4f1dd1e4a0c9a82d5e6f985622dc
 +    }
 +  );
 +
-+  // NOTE: renderer-only image loading uses IPC dataURL for secure, stable stage rendering.
-+  ipcMain.handle('assets:readDataUrl', async (_event, { assetId }: { assetId: string }) => {
-+    if (!projectContext.projectPath || !projectContext.manifest) {
-+      throw new Error('No open project context for asset resolution');
++  ipcMain.handle(
++    'assets:readDataUrl',
++    async (_event, { projectPath, assetId }: { projectPath?: string; assetId: string }) => {
++      try {
++        const activeProjectPath = projectPath ?? projectContext.projectPath;
++        if (!activeProjectPath) {
++          throw new Error('No open project path for asset resolution');
++        }
++
++        let activeManifest = projectContext.manifest;
++        if (!activeManifest || projectContext.projectPath !== activeProjectPath) {
++          const manifestText = await fs.readFile(path.join(activeProjectPath, 'manifest.json'), 'utf-8');
++          const manifest = JSON.parse(manifestText) as ProjectManifest;
++          setProjectContext(activeProjectPath, manifest);
++          activeManifest = manifest;
++        }
++
++        const meta = activeManifest.assetRegistry[assetId];
++        if (!meta) throw new Error(`Asset not found in registry: ${assetId}`);
++        const assetPath = path.join(activeProjectPath, 'assets', `${assetId}.${meta.ext}`);
++        const content = await fs.readFile(assetPath);
++        const mime = readMime(meta.ext);
++        console.info(`[assets:readDataUrl] assetId=${assetId} mime=${mime} bytes=${content.length} success=true`);
++        return `data:${mime};base64,${content.toString('base64')}`;
++      } catch (error) {
++        console.error(
++          `[assets:readDataUrl] assetId=${assetId} success=false error=${(error as Error).message}`
++        );
++        throw error;
++      }
 +    }
-+    const meta = projectContext.manifest.assetRegistry[assetId];
-+    if (!meta) throw new Error(`Asset not found in registry: ${assetId}`);
-+    const assetPath = path.join(projectContext.projectPath, 'assets', `${assetId}.${meta.ext}`);
-+    const content = await fs.readFile(assetPath);
-+    const mime = readMime(meta.ext);
-+    return `data:${mime};base64,${content.toString('base64')}`;
++  );
++
++  ipcMain.handle('app:simulateCrash', async () => {
++    app.exit(99);
++    return true;
 +  });
 +
 +  app.on('activate', () => {
@@ -5835,14 +5877,16 @@ index 0000000000000000000000000000000000000000..c10b4f1dd1e4a0c9a82d5e6f985622dc
 +});
 diff --git a/src/preload/index.ts b/src/preload/index.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..17f0c8450679fbd8c907ccfee79face2a066aa45
+index 0000000000000000000000000000000000000000..e8cbf0e43c2061f9af38c7337111f64eb34375e5
 --- /dev/null
 +++ b/src/preload/index.ts
 @@ -0,0 +1,26 @@
 +import { contextBridge, ipcRenderer } from 'electron';
 +import type { ProjectManifest } from '../renderer/types/domain';
++import { buildInfo } from '../shared/buildInfo';
 +
 +const studioApi = {
++  buildInfo,
 +  createProject: () => ipcRenderer.invoke('project:create'),
 +  openProject: () => ipcRenderer.invoke('project:open'),
 +  importAssets: (projectPath: string) => ipcRenderer.invoke('asset:importMany', { projectPath }),
@@ -5854,23 +5898,21 @@ index 0000000000000000000000000000000000000000..17f0c8450679fbd8c907ccfee79face2
 +  exportProject: (projectPath: string, manifest: ProjectManifest) =>
 +    ipcRenderer.invoke('project:export', { projectPath, manifest }),
 +  healthCheck: (projectPath: string, manifest: ProjectManifest) =>
-+    ipcRenderer.invoke('project:healthCheck', { projectPath, manifest })
-+};
-+
-+const studio = {
++    ipcRenderer.invoke('project:healthCheck', { projectPath, manifest }),
 +  assets: {
-+    readDataUrl: (assetId: string) => ipcRenderer.invoke('assets:readDataUrl', { assetId })
-+  }
++    readDataUrl: (projectPath: string, assetId: string) =>
++      ipcRenderer.invoke('assets:readDataUrl', { projectPath, assetId })
++  },
++  simulateCrash: () => ipcRenderer.invoke('app:simulateCrash')
 +};
 +
 +contextBridge.exposeInMainWorld('studioApi', studioApi);
-+contextBridge.exposeInMainWorld('studio', studio);
 diff --git a/src/renderer/core/timelinePlayer.ts b/src/renderer/core/timelinePlayer.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..c2dcfdfe51d0b774138de2b7509283af75cce779
+index 0000000000000000000000000000000000000000..9b0b7f5aed07513687c5c6e4ff4c846d8b321327
 --- /dev/null
 +++ b/src/renderer/core/timelinePlayer.ts
-@@ -0,0 +1,111 @@
+@@ -0,0 +1,125 @@
 +import type { Section, TimelineItem, TimelineMode } from '../types/domain';
 +
 +export class TimelinePlayer {
@@ -5879,14 +5921,28 @@ index 0000000000000000000000000000000000000000..c2dcfdfe51d0b774138de2b7509283af
 +  private index = 0;
 +  private status: 'playing' | 'paused' | 'stopped' = 'stopped';
 +
-+  loadSection(sectionId: string, sections: Section[], preserveIndex = false): void {
++  loadSection(sectionId: string, sections: Section[]): void {
 +    const section = sections.find((item) => item.id === sectionId);
 +    if (!section) {
 +      throw new Error(`Section not found: ${sectionId}`);
 +    }
++
++    const sectionChanged = this.section?.id !== section.id;
 +    this.section = section;
-+    this.index = preserveIndex ? Math.min(this.index, Math.max(0, section.timeline.length - 1)) : 0;
-+    this.status = 'stopped';
++
++    // Do not reset index on every navigation refresh; only when section changes.
++    if (sectionChanged) {
++      this.index = 0;
++      this.status = 'stopped';
++      return;
++    }
++
++    if (section.timeline.length === 0) {
++      this.index = 0;
++      return;
++    }
++
++    this.index = Math.min(this.index, section.timeline.length - 1);
 +  }
 +
 +  play(): void {
@@ -6210,10 +6266,10 @@ index 0000000000000000000000000000000000000000..154633cc72348ba53eab17fc513fe9c2
 +}
 diff --git a/src/renderer/types/global.d.ts b/src/renderer/types/global.d.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..4f601a68ed7d031a6db420d8bcc8495cb755efea
+index 0000000000000000000000000000000000000000..251c68d12acf6fef4a6ffc34c2ba1f064953e7b7
 --- /dev/null
 +++ b/src/renderer/types/global.d.ts
-@@ -0,0 +1,42 @@
+@@ -0,0 +1,48 @@
 +import type { ProjectManifest } from './domain';
 +
 +type ImportedAsset = {
@@ -6226,9 +6282,16 @@ index 0000000000000000000000000000000000000000..4f601a68ed7d031a6db420d8bcc8495c
 +  assetPath: string;
 +};
 +
++type BuildInfo = {
++  version: string;
++  buildHash: string;
++  buildTime: string;
++};
++
 +declare global {
 +  interface Window {
 +    studioApi: {
++      buildInfo: BuildInfo;
 +      createProject: () => Promise<{ projectPath: string; manifest: ProjectManifest }>;
 +      openProject: () => Promise<{ projectPath: string; manifest: ProjectManifest }>;
 +      importAssets: (projectPath: string) => Promise<ImportedAsset[]>;
@@ -6246,11 +6309,10 @@ index 0000000000000000000000000000000000000000..4f601a68ed7d031a6db420d8bcc8495c
 +        manifest: ProjectManifest
 +      ) => Promise<{ exportPath: string; size: number; validatedAssets: number; logPath: string }>;
 +      healthCheck: (projectPath: string, manifest: ProjectManifest) => Promise<{ missing: string[] }>;
-+    };
-+    studio: {
 +      assets: {
-+        readDataUrl: (assetId: string) => Promise<string>;
++        readDataUrl: (projectPath: string, assetId: string) => Promise<string>;
 +      };
++      simulateCrash: () => Promise<boolean>;
 +    };
 +  }
 +}
@@ -6258,17 +6320,21 @@ index 0000000000000000000000000000000000000000..4f601a68ed7d031a6db420d8bcc8495c
 +export {};
 diff --git a/src/renderer/ui/App.tsx b/src/renderer/ui/App.tsx
 new file mode 100644
-index 0000000000000000000000000000000000000000..00085a1467d3e44edf2eb7a43b93700a8e062155
+index 0000000000000000000000000000000000000000..e4a132bdf2a7dc0457e1d912e03b5f51c0b982ad
 --- /dev/null
 +++ b/src/renderer/ui/App.tsx
-@@ -0,0 +1,421 @@
+@@ -0,0 +1,455 @@
 +import { useEffect, useMemo, useRef, useState } from 'react';
 +import { v4 as uuid } from 'uuid';
 +import { TimelinePlayer } from '../core/timelinePlayer';
 +import { AutopilotModule } from '../modules/AutopilotModule';
 +import { ModuleRegistry } from '../modules/registry';
 +import { TranslationModule } from '../modules/TranslationModule';
-+import { autosaveProject, exportProject as exportProjectFile, saveProject as saveProjectFile } from '../persistence/projectClient';
++import {
++  autosaveProject,
++  exportProject as exportProjectFile,
++  saveProject as saveProjectFile
++} from '../persistence/projectClient';
 +import type { SlideItem, TimelineItem } from '../types/domain';
 +import { useStudioStore } from './store/studioStore';
 +
@@ -6277,6 +6343,15 @@ index 0000000000000000000000000000000000000000..00085a1467d3e44edf2eb7a43b93700a
 +moduleRegistry.register(AutopilotModule);
 +
 +const autosaveEveryMs = 30000;
++
++function formatBuildTime(value: string): string {
++  const date = new Date(value);
++  if (Number.isNaN(date.getTime())) return value;
++  const pad = (n: number) => String(n).padStart(2, '0');
++  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(
++    date.getMinutes()
++  )}`;
++}
 +
 +export function App() {
 +  const {
@@ -6317,6 +6392,10 @@ index 0000000000000000000000000000000000000000..00085a1467d3e44edf2eb7a43b93700a
 +  const playerRef = useRef(new TimelinePlayer());
 +  const dirtyRef = useRef(false);
 +
++  const build = window.studioApi.buildInfo;
++  const diagnosticsApiKeys = Object.keys(window.studioApi);
++  const hasReadDataUrl = typeof window.studioApi.assets?.readDataUrl === 'function';
++
 +  const section = useMemo(
 +    () => manifest.sections.find((item) => item.id === selectedSectionId) ?? manifest.sections[0],
 +    [manifest.sections, selectedSectionId]
@@ -6327,12 +6406,12 @@ index 0000000000000000000000000000000000000000..00085a1467d3e44edf2eb7a43b93700a
 +  useEffect(() => {
 +    if (!section) return;
 +    try {
-+      playerRef.current.loadSection(section.id, manifest.sections, true);
-+      if (section.timeline.length && selectedItemId) {
++      playerRef.current.loadSection(section.id, manifest.sections);
++      if (selectedItemId) {
 +        playerRef.current.goto(selectedItemId);
-+      } else if (section.timeline.length) {
-+        const item = playerRef.current.first();
-+        if (item) selectItem(item.id);
++      } else {
++        const first = playerRef.current.first();
++        if (first) selectItem(first.id);
 +      }
 +    } catch (error) {
 +      setStatus({ type: 'error', text: (error as Error).message });
@@ -6340,14 +6419,20 @@ index 0000000000000000000000000000000000000000..00085a1467d3e44edf2eb7a43b93700a
 +  }, [section?.id, manifest.sections, selectedItemId, selectItem, setStatus]);
 +
 +  useEffect(() => {
-+    if (!selectedItem || selectedItem.type !== 'slide') return;
++    if (!selectedItem || selectedItem.type !== 'slide' || !projectPath) return;
 +    if (assetDataUrlCache[selectedItem.assetId]) return;
-+    // NOTE: cache resolved image dataURLs to avoid repeated IPC reads while navigating.
-+    void window.studio.assets
-+      .readDataUrl(selectedItem.assetId)
-+      .then((dataUrl) => cacheAssetDataUrl(selectedItem.assetId, dataUrl))
-+      .catch((error: Error) => setStatus({ type: 'error', text: error.message }));
-+  }, [assetDataUrlCache, cacheAssetDataUrl, selectedItem, setStatus]);
++
++    void window.studioApi.assets
++      .readDataUrl(projectPath, selectedItem.assetId)
++      .then((dataUrl) => {
++        cacheAssetDataUrl(selectedItem.assetId, dataUrl);
++        console.info(`[renderer:readDataUrl] assetId=${selectedItem.assetId} success=true`);
++      })
++      .catch((error: Error) => {
++        console.error(`[renderer:readDataUrl] assetId=${selectedItem.assetId} success=false ${error.message}`);
++        setStatus({ type: 'error', text: error.message });
++      });
++  }, [assetDataUrlCache, cacheAssetDataUrl, selectedItem, projectPath, setStatus]);
 +
 +  useEffect(() => {
 +    dirtyRef.current = true;
@@ -6382,6 +6467,7 @@ index 0000000000000000000000000000000000000000..00085a1467d3e44edf2eb7a43b93700a
 +    if (!item) return;
 +    selectItem(item.id);
 +    setCurrentTimelineIndex(playerRef.current.getIndex());
++    console.info(`[timeline-nav] index=${playerRef.current.getIndex()} itemId=${item.id}`);
 +  };
 +
 +  const nav = (action: 'next' | 'prev' | 'first' | 'last' | 'nextPageBreak') => {
@@ -6425,7 +6511,6 @@ index 0000000000000000000000000000000000000000..00085a1467d3e44edf2eb7a43b93700a
 +      }
 +    };
 +
-+    // NOTE: window-level keyboard listener; does not require timeline focus.
 +    window.addEventListener('keydown', onKeyDown);
 +    return () => window.removeEventListener('keydown', onKeyDown);
 +  }, [isPlaying]);
@@ -6465,8 +6550,6 @@ index 0000000000000000000000000000000000000000..00085a1467d3e44edf2eb7a43b93700a
 +    if (!projectPath) return;
 +    try {
 +      const result = await window.studioApi.recoverProject(projectPath);
-+      // NOTE: explicit store hydration path for recovery and timeline index reset.
-+      useStudioStore.setState((state) => ({ ...state }));
 +      hydrateRecovered(projectPath, result.manifest);
 +      setStatus({ type: 'success', text: `Recovered from ${result.autosavePath}` });
 +    } catch (error) {
@@ -6561,6 +6644,9 @@ index 0000000000000000000000000000000000000000..00085a1467d3e44edf2eb7a43b93700a
 +
 +  return (
 +    <div className="app">
++      <div className="build-banner">
++        BUILD {build.buildHash} | v{build.version} | {formatBuildTime(build.buildTime)}
++      </div>
 +      <header>
 +        <button onClick={createProject}>Create Project</button>
 +        <button onClick={openProject}>Open</button>
@@ -6568,9 +6654,10 @@ index 0000000000000000000000000000000000000000..00085a1467d3e44edf2eb7a43b93700a
 +        <button onClick={recoverProject}>Recover Autosave</button>
 +        <button onClick={exportProject}>Export .tstudio</button>
 +        <button onClick={checkHealth}>Health Check</button>
-+        <button onClick={importSlides}>Import Slide(s)</button>
++        <button onClick={importSlides}>Import Slides</button>
 +        <button onClick={importMusic}>Import Music</button>
 +        <button onClick={addPageBreak}>Add PageBreak</button>
++        {import.meta.env.DEV && <button onClick={() => void window.studioApi.simulateCrash()}>Simulate Crash</button>}
 +      </header>
 +      <div className="timestamps">
 +        <span>Project: {projectPath ?? 'none'}</span>
@@ -6611,6 +6698,8 @@ index 0000000000000000000000000000000000000000..00085a1467d3e44edf2eb7a43b93700a
 +              onClick={() => {
 +                selectItem(item.id);
 +                setCurrentTimelineIndex(index);
++                playerRef.current.gotoIndex(index);
++                console.info(`[timeline-click] index=${index} itemId=${item.id}`);
 +              }}
 +              className={selectedItemId === item.id ? 'selected' : ''}
 +            >
@@ -6623,7 +6712,11 @@ index 0000000000000000000000000000000000000000..00085a1467d3e44edf2eb7a43b93700a
 +          <div className="stage">
 +            {selectedItem ? (
 +              selectedItem.type === 'slide' ? (
-+                slideDataUrl ? <img src={slideDataUrl} alt={selectedItem.label} className="slide-img" /> : <p>Loading image…</p>
++                slideDataUrl ? (
++                  <img src={slideDataUrl} alt={selectedItem.label} className="slide-img" />
++                ) : (
++                  <p>Loading image…</p>
++                )
 +              ) : selectedItem.type === 'pageBreak' ? (
 +                <div>
 +                  <h2>{selectedItem.title}</h2>
@@ -6646,6 +6739,9 @@ index 0000000000000000000000000000000000000000..00085a1467d3e44edf2eb7a43b93700a
 +          </div>
 +        </section>
 +        <aside>
++          <h3>Diagnostics</h3>
++          <div>studioApi keys: {diagnosticsApiKeys.join(', ')}</div>
++          <div>assets.readDataUrl exists: {String(hasReadDataUrl)}</div>
 +          <h3>Properties</h3>
 +          {selectedItem?.type === 'pageBreak' && (
 +            <>
@@ -6942,12 +7038,12 @@ index 0000000000000000000000000000000000000000..2638431e86829e38d7a092cd731b224b
 +}));
 diff --git a/src/renderer/ui/styles.css b/src/renderer/ui/styles.css
 new file mode 100644
-index 0000000000000000000000000000000000000000..caf705abc912f209e98a8a9e6dd6337fc877dc42
+index 0000000000000000000000000000000000000000..366544ca2a233aec676dcbc255a9ec68875910d4
 --- /dev/null
 +++ b/src/renderer/ui/styles.css
 @@ -0,0 +1,15 @@
 +body { margin: 0; font-family: Arial, sans-serif; }
-+.app { display: flex; flex-direction: column; height: 100vh; }
++.app { display: flex; flex-direction: column; height: 100vh; position: relative; }
 +header { display: flex; gap: 8px; padding: 8px; border-bottom: 1px solid #ddd; flex-wrap: wrap; }
 +.timestamps { display:flex; gap: 12px; font-size: 12px; padding: 4px 8px; }
 +main { display: grid; grid-template-columns: 300px 1fr 320px; gap: 10px; padding: 10px; flex: 1; }
@@ -6959,14 +7055,46 @@ index 0000000000000000000000000000000000000000..caf705abc912f209e98a8a9e6dd6337f
 +.status.error { background: #ffdddd; }
 +.status.info { background: #e5f0ff; }
 +.controls { margin-top: 10px; display: flex; gap: 8px; }
-+
 +.slide-img { max-width: 100%; max-height: 100%; object-fit: contain; }
++.build-banner { position: absolute; right: 10px; top: 10px; z-index: 10; font-size: 12px; background: #111; color: #fff; padding: 4px 8px; border-radius: 4px; }
+diff --git a/src/renderer/vite-env.d.ts b/src/renderer/vite-env.d.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..11f02fe2a0061d6e6e1f271b21da95423b448b32
+--- /dev/null
++++ b/src/renderer/vite-env.d.ts
+@@ -0,0 +1 @@
++/// <reference types="vite/client" />
+diff --git a/src/shared/buildInfo.ts b/src/shared/buildInfo.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..0323047311cb0ad3ff6444f7a900377acc611409
+--- /dev/null
++++ b/src/shared/buildInfo.ts
+@@ -0,0 +1,19 @@
++import pkg from '../../package.json';
++
++declare const __BUILD_HASH__: string | undefined;
++declare const __BUILD_TIME__: string | undefined;
++
++type BuildInfo = {
++  version: string;
++  buildHash: string;
++  buildTime: string;
++};
++
++const runtimeEnv = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
++
++export const buildInfo: BuildInfo = {
++  version: pkg.version,
++  buildHash: (typeof __BUILD_HASH__ !== 'undefined' ? __BUILD_HASH__ : runtimeEnv?.BUILD_HASH) ?? 'DEV',
++  buildTime:
++    (typeof __BUILD_TIME__ !== 'undefined' ? __BUILD_TIME__ : runtimeEnv?.BUILD_TIME) ?? new Date().toISOString()
++};
 diff --git a/tsconfig.electron.json b/tsconfig.electron.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..980ce51b436279098d72c340fffc07f503135208
+index 0000000000000000000000000000000000000000..38c4fce4dcd39466e6ff525c870317c2649b4bc7
 --- /dev/null
 +++ b/tsconfig.electron.json
-@@ -0,0 +1,15 @@
+@@ -0,0 +1,23 @@
 +{
 +  "compilerOptions": {
 +    "target": "ES2022",
@@ -6976,23 +7104,35 @@ index 0000000000000000000000000000000000000000..980ce51b436279098d72c340fffc07f5
 +    "skipLibCheck": true,
 +    "outDir": "dist-electron",
 +    "rootDir": "src",
-+    "types": ["node", "electron"],
++    "types": [
++      "node",
++      "electron"
++    ],
 +    "esModuleInterop": true,
 +    "resolveJsonModule": true
 +  },
-+  "include": ["src/main", "src/preload", "src/renderer/types"]
++  "include": [
++    "src/main",
++    "src/preload",
++    "src/renderer/types",
++    "src/shared"
++  ]
 +}
 diff --git a/tsconfig.json b/tsconfig.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..dbdd407906b127e53f503985fe4516f415b019ee
+index 0000000000000000000000000000000000000000..11dd28ea896315abc11df1e5d5fc034354fa1deb
 --- /dev/null
 +++ b/tsconfig.json
-@@ -0,0 +1,23 @@
+@@ -0,0 +1,32 @@
 +{
 +  "compilerOptions": {
 +    "target": "ES2022",
 +    "useDefineForClassFields": true,
-+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
++    "lib": [
++      "ES2022",
++      "DOM",
++      "DOM.Iterable"
++    ],
 +    "module": "ESNext",
 +    "skipLibCheck": true,
 +    "moduleResolution": "Bundler",
@@ -7006,22 +7146,42 @@ index 0000000000000000000000000000000000000000..dbdd407906b127e53f503985fe4516f4
 +    "noUnusedParameters": true,
 +    "baseUrl": ".",
 +    "paths": {
-+      "@/*": ["src/renderer/*"]
++      "@/*": [
++        "src/renderer/*"
++      ]
 +    }
 +  },
-+  "include": ["src/renderer"]
++  "include": [
++    "src/renderer",
++    "src/shared"
++  ]
 +}
 diff --git a/vite.config.ts b/vite.config.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..8a19aa9b34d6e7b7bceea22faea8e3bea35a4538
+index 0000000000000000000000000000000000000000..fadee2e624b00c04b8f99d872716203b31abb998
 --- /dev/null
 +++ b/vite.config.ts
-@@ -0,0 +1,6 @@
+@@ -0,0 +1,21 @@
++import { execSync } from 'node:child_process';
 +import { defineConfig } from 'vite';
 +import react from '@vitejs/plugin-react';
 +
++function resolveBuildHash(): string {
++  try {
++    return execSync('git rev-parse --short HEAD', { stdio: ['ignore', 'pipe', 'ignore'] })
++      .toString()
++      .trim();
++  } catch {
++    return 'DEV';
++  }
++}
++
 +export default defineConfig({
-+  plugins: [react()]
++  plugins: [react()],
++  define: {
++    __BUILD_HASH__: JSON.stringify(resolveBuildHash()),
++    __BUILD_TIME__: JSON.stringify(new Date().toISOString())
++  }
 +});
  
 EOF

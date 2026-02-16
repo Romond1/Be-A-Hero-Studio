@@ -47,11 +47,61 @@ export function App() {
   const playerRef = useRef(new TimelinePlayer());
   const dirtyRef = useRef(false);
 
+  // ✅ NEW: image data URL for selected slide
+  const [imgUrl, setImgUrl] = useState<string | null>(null);
+  const [imgError, setImgError] = useState<string | null>(null);
+
   const section = useMemo(
     () => manifest.sections.find((item) => item.id === selectedSectionId) ?? manifest.sections[0],
     [manifest.sections, selectedSectionId]
   );
   const selectedItem = section?.timeline.find((item) => item.id === selectedItemId);
+
+  // ✅ NEW: load slide image via IPC when selection changes
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadSelectedSlideImage() {
+      setImgError(null);
+
+      // Nothing selected OR not a slide → clear image
+      if (!selectedItem || selectedItem.type !== 'slide') {
+        setImgUrl(null);
+        return;
+      }
+
+      try {
+        // This API is provided by your updated preload/main process
+        const w = window as any;
+const readDataUrl =
+  w.studio?.assets?.readDataUrl ??
+  w.studioApi?.assets?.readDataUrl ??
+  w.studioApi?.readDataUrl;
+
+if (!readDataUrl) {
+  throw new Error(
+    `No readDataUrl API found. Available: studio=${Object.keys(w.studio ?? {}).join(',')} studioApi=${Object.keys(
+      w.studioApi ?? {}
+    ).join(',')}`
+  );
+}
+
+const url = await readDataUrl(selectedItem.assetId);
+        if (!cancelled) setImgUrl(url);
+      } catch (e) {
+        if (!cancelled) {
+          setImgUrl(null);
+          setImgError((e as Error).message ?? 'Failed to load image');
+        }
+      }
+    }
+
+    loadSelectedSlideImage();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedItem]);
 
   useEffect(() => {
     dirtyRef.current = true;
@@ -210,6 +260,10 @@ export function App() {
 
   return (
     <div className="app">
+      <div style={{ position: 'fixed', top: 6, right: 10, fontSize: 12, opacity: 0.8 }}>
+        BUILD: 22acbf1
+      </div>
+
       <header>
         <button onClick={createProject}>Create Project</button>
         <button onClick={openProject}>Open</button>
@@ -221,12 +275,15 @@ export function App() {
         <button onClick={importMusic}>Import Music</button>
         <button onClick={addPageBreak}>Add PageBreak</button>
       </header>
+
       <div className="timestamps">
         <span>Project: {projectPath ?? 'none'}</span>
         <span>Last Save: {lastSavedAt ?? 'n/a'}</span>
         <span>Last Autosave: {lastAutosaveAt ?? 'n/a'}</span>
       </div>
+
       {status && <div className={`status ${status.type}`}>{status.text}</div>}
+
       <main>
         <aside>
           <h3>Sections</h3>
@@ -246,6 +303,7 @@ export function App() {
               <input value={item.title} onChange={(event) => renameSection(item.id, event.target.value)} />
             </div>
           ))}
+
           <h3>Timeline</h3>
           {section?.timeline.map((item, index) => (
             <div
@@ -263,8 +321,10 @@ export function App() {
             </div>
           ))}
         </aside>
+
         <section className="viewer">
           <h3>Viewer Stage (OBS)</h3>
+
           <div className="stage">
             {selectedItem ? (
               selectedItem.type === 'pageBreak' ? (
@@ -273,15 +333,29 @@ export function App() {
                   <p>{selectedItem.questionsText}</p>
                 </div>
               ) : (
-                <div>
-                  <h2>{selectedItem.label}</h2>
-                  <p>Asset: {selectedItem.assetId}</p>
+                <div style={{ width: '100%', height: '100%' }}>
+                  {/* ✅ NEW: actually display the slide image */}
+                  {imgUrl ? (
+                    <img
+                      src={imgUrl}
+                      alt={selectedItem.label}
+                      style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+                    />
+                  ) : (
+                    <div>
+                      <h2>{selectedItem.label}</h2>
+                      <p>Asset: {selectedItem.assetId}</p>
+                      {imgError && <p style={{ color: 'crimson' }}>Image error: {imgError}</p>}
+                      {!imgError && <p>Loading image...</p>}
+                    </div>
+                  )}
                 </div>
               )
             ) : (
               <p>Select timeline item</p>
             )}
           </div>
+
           <div className="controls">
             <button onClick={() => nav('prev')}>Prev</button>
             <button onClick={() => nav('next')}>Next</button>
@@ -295,8 +369,10 @@ export function App() {
             </button>
           </div>
         </section>
+
         <aside>
           <h3>Properties</h3>
+
           {selectedItem?.type === 'pageBreak' && (
             <>
               <label>Title</label>
@@ -316,14 +392,17 @@ export function App() {
               />
             </>
           )}
+
           <h3>Section Music</h3>
           {section?.musicItems.map((music) => (
             <div key={music.id}>{music.label}</div>
           ))}
+
           <h3>Modules</h3>
           {moduleRegistry.all().map((module) => (
             <div key={module.id}>{module.name}</div>
           ))}
+
           <h3>Health Issues</h3>
           {healthIssues.map((issue) => (
             <div key={issue}>{issue}</div>
