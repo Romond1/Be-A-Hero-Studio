@@ -20,7 +20,8 @@ const studioApi = {
     readDataUrl: (projectPath: string, assetId: string) =>
       ipcRenderer.invoke('assets:readDataUrl', { projectPath, assetId })
   },
-  simulateCrash: () => ipcRenderer.invoke('app:simulateCrash')
+  simulateCrash: () => ipcRenderer.invoke('app:simulateCrash'),
+  getApiKeys: () => Object.keys(studioApi)
 };
 
 contextBridge.exposeInMainWorld('studioApi', studioApi);

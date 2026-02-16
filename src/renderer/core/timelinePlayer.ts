@@ -88,6 +88,11 @@ export class TimelinePlayer {
     return this.gotoIndex(this.section.timeline.length - 1);
   }
 
+
+  jumpNextPageBreak(): TimelineItem | undefined {
+    return this.nextPageBreak();
+  }
+
   nextPageBreak(): TimelineItem | undefined {
     this.ensureSectionLoaded();
     if (!this.section) return undefined;

@@ -11,6 +11,7 @@ import {
 } from '../persistence/projectClient';
 import type { SlideItem, TimelineItem } from '../types/domain';
 import { useStudioStore } from './store/studioStore';
+import { buildInfo as localBuildInfo } from '../../shared/buildInfo';
 
 const moduleRegistry = new ModuleRegistry();
 moduleRegistry.register(TranslationModule);
@@ -66,8 +67,8 @@ export function App() {
   const playerRef = useRef(new TimelinePlayer());
   const dirtyRef = useRef(false);
 
-  const build = window.studioApi.buildInfo;
-  const diagnosticsApiKeys = Object.keys(window.studioApi);
+  const build = window.studioApi.buildInfo ?? localBuildInfo;
+  const diagnosticsApiKeys = window.studioApi.getApiKeys();
   const hasReadDataUrl = typeof window.studioApi.assets?.readDataUrl === 'function';
 
   const section = useMemo(
@@ -152,7 +153,7 @@ export function App() {
       if (action === 'prev') item = playerRef.current.prev();
       if (action === 'first') item = playerRef.current.first();
       if (action === 'last') item = playerRef.current.last();
-      if (action === 'nextPageBreak') item = playerRef.current.nextPageBreak();
+      if (action === 'nextPageBreak') item = playerRef.current.jumpNextPageBreak();
       moveToItem(item);
     } catch (error) {
       setStatus({ type: 'error', text: (error as Error).message });

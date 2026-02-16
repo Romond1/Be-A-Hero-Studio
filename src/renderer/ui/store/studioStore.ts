@@ -71,7 +71,8 @@ export const useStudioStore = create<StudioStore>((set, get) => ({
       selectedSectionId: firstSectionId,
       selectedItemId: firstItemId,
       currentTimelineIndex: firstItemId ? 0 : 0,
-      healthIssues: validateManifest(manifest)
+      healthIssues: validateManifest(manifest),
+      assetDataUrlCache: {}
     });
   },
   hydrateRecovered: (projectPath, manifest) => {
@@ -82,7 +83,8 @@ export const useStudioStore = create<StudioStore>((set, get) => ({
       selectedSectionId: firstSection?.id,
       selectedItemId: firstSection?.timeline[0]?.id,
       currentTimelineIndex: 0,
-      healthIssues: validateManifest(manifest)
+      healthIssues: validateManifest(manifest),
+      assetDataUrlCache: {}
     });
   },
   addSection: () =>

@@ -303,12 +303,9 @@ app.whenReady().then(() => {
 
   ipcMain.handle(
     'assets:readDataUrl',
-    async (_event, { projectPath, assetId }: { projectPath?: string; assetId: string }) => {
+    async (_event, { projectPath, assetId }: { projectPath: string; assetId: string }) => {
       try {
-        const activeProjectPath = projectPath ?? projectContext.projectPath;
-        if (!activeProjectPath) {
-          throw new Error('No open project path for asset resolution');
-        }
+        const activeProjectPath = projectPath;
 
         let activeManifest = projectContext.manifest;
         if (!activeManifest || projectContext.projectPath !== activeProjectPath) {

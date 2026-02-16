@@ -41,6 +41,7 @@ declare global {
         readDataUrl: (projectPath: string, assetId: string) => Promise<string>;
       };
       simulateCrash: () => Promise<boolean>;
+      getApiKeys: () => string[];
     };
   }
 }
