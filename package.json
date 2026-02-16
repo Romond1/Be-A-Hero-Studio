@@ -5,7 +5,7 @@
   "main": "dist-electron/main/index.js",
   "type": "module",
   "scripts": {
-    "dev": "concurrently \"vite\" \"wait-on tcp:5173 && electron .\"",
+    "dev": "concurrently \"vite\" \"tsc -p tsconfig.electron.json -w\" \"wait-on tcp:5173 && electron .\"",
     "build": "tsc -b && vite build && tsc -p tsconfig.electron.json",
     "lint": "eslint . --ext .ts,.tsx",
     "preview": "vite preview"
