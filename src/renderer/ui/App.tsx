@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import type { WheelEvent as ReactWheelEvent } from 'react';
 import { v4 as uuid } from 'uuid';
 import { TimelinePlayer } from '../core/timelinePlayer';
 import { AutopilotModule } from '../modules/AutopilotModule';
@@ -9,7 +10,7 @@ import {
   exportProject as exportProjectFile,
   saveProject as saveProjectFile
 } from '../persistence/projectClient';
-import type { SlideItem, TimelineItem } from '../types/domain';
+import type { DialogueLine, SlideItem, TimelineItem } from '../types/domain';
 import { useStudioStore } from './store/studioStore';
 import { buildInfo as localBuildInfo } from '../../shared/buildInfo';
 
@@ -27,6 +28,8 @@ function formatBuildTime(value: string): string {
     date.getMinutes()
   )}`;
 }
+
+type ZoomState = { scale: number; x: number; y: number };
 
 export function App() {
   const {
@@ -54,6 +57,11 @@ export function App() {
     updatePageBreak,
     reorderTimeline,
     addMusicItem,
+    removeMusicItem,
+    reorderMusicItem,
+    addDialogueLine,
+    updateDialogueLine,
+    removeDialogueLine,
     markSaved,
     markAutosaved,
     runHealthCheck,
@@ -64,6 +72,10 @@ export function App() {
   const [sectionDragIndex, setSectionDragIndex] = useState<number | null>(null);
   const [timelineDragIndex, setTimelineDragIndex] = useState<number | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [zoom, setZoom] = useState<ZoomState>({ scale: 1, x: 0, y: 0 });
+  const [musicOpen, setMusicOpen] = useState(true);
+  const [dialogueOpen, setDialogueOpen] = useState(true);
+  const [musicPreviewId, setMusicPreviewId] = useState<string | null>(null);
   const playerRef = useRef(new TimelinePlayer());
   const dirtyRef = useRef(false);
 
@@ -77,6 +89,7 @@ export function App() {
   );
 
   const selectedItem = section?.timeline.find((item) => item.id === selectedItemId);
+  const selectedSlide = selectedItem?.type === 'slide' ? selectedItem : undefined;
 
   useEffect(() => {
     if (!section) return;
@@ -94,6 +107,10 @@ export function App() {
   }, [section?.id, manifest.sections, selectedItemId, selectItem, setStatus]);
 
   useEffect(() => {
+    setZoom({ scale: 1, x: 0, y: 0 });
+  }, [selectedItemId]);
+
+  useEffect(() => {
     if (!selectedItem || selectedItem.type !== 'slide' || !projectPath) return;
     if (assetDataUrlCache[selectedItem.assetId]) return;
 
@@ -101,10 +118,8 @@ export function App() {
       .readDataUrl(projectPath, selectedItem.assetId)
       .then((dataUrl) => {
         cacheAssetDataUrl(selectedItem.assetId, dataUrl);
-        console.info(`[renderer:readDataUrl] assetId=${selectedItem.assetId} success=true`);
       })
       .catch((error: Error) => {
-        console.error(`[renderer:readDataUrl] assetId=${selectedItem.assetId} success=false ${error.message}`);
         setStatus({ type: 'error', text: error.message });
       });
   }, [assetDataUrlCache, cacheAssetDataUrl, selectedItem, projectPath, setStatus]);
@@ -142,7 +157,6 @@ export function App() {
     if (!item) return;
     selectItem(item.id);
     setCurrentTimelineIndex(playerRef.current.getIndex());
-    console.info(`[timeline-nav] index=${playerRef.current.getIndex()} itemId=${item.id}`);
   };
 
   const nav = (action: 'next' | 'prev' | 'first' | 'last' | 'nextPageBreak') => {
@@ -245,11 +259,28 @@ export function App() {
     }
   };
 
+  async function chooseImportModeAndImport(): Promise<
+    {
+      assetId: string;
+      ext: string;
+      mime: string;
+      originalFileName: string;
+      size: number;
+      hash: string;
+      assetPath: string;
+    }[]
+  > {
+    if (!projectPath) return [];
+    const folderMode = window.confirm('Import folder? Click OK for folder, Cancel for files.');
+    return folderMode ? window.studioApi.importFolder(projectPath) : window.studioApi.importAsset(projectPath);
+  }
+
   const importSlides = async () => {
     if (!projectPath) return;
     try {
-      const assets = await window.studioApi.importAssets(projectPath);
-      for (const asset of assets) {
+      const assets = await chooseImportModeAndImport();
+      const imageAssets = assets.filter((asset) => asset.mime.startsWith('image/'));
+      for (const asset of imageAssets) {
         registerAsset(asset.assetId, {
           ext: asset.ext,
           mime: asset.mime,
@@ -258,9 +289,7 @@ export function App() {
           hash: asset.hash
         });
       }
-
-      let inserted = 0;
-      for (const asset of assets) {
+      for (const asset of imageAssets) {
         const slide: SlideItem = {
           id: uuid(),
           type: 'slide',
@@ -269,12 +298,12 @@ export function App() {
           transition: 'cut',
           durationMs: 10000,
           panDirection: 'none',
-          dialogueItems: []
+          dialogueItems: [],
+          dialogueLines: []
         };
         addTimelineItemAfterSelection(slide);
-        inserted += 1;
       }
-      setStatus({ type: 'success', text: `Imported ${inserted} slide(s)` });
+      setStatus({ type: 'success', text: `Imported ${imageAssets.length} slide(s)` });
     } catch (error) {
       setStatus({ type: 'error', text: (error as Error).message });
     }
@@ -283,8 +312,9 @@ export function App() {
   const importMusic = async () => {
     if (!projectPath) return;
     try {
-      const assets = await window.studioApi.importAssets(projectPath);
-      for (const asset of assets) {
+      const assets = await chooseImportModeAndImport();
+      const audioAssets = assets.filter((asset) => asset.mime.startsWith('audio/'));
+      for (const asset of audioAssets) {
         registerAsset(asset.assetId, {
           ext: asset.ext,
           mime: asset.mime,
@@ -294,7 +324,7 @@ export function App() {
         });
         addMusicItem(asset.assetId, asset.originalFileName);
       }
-      setStatus({ type: 'success', text: `Imported ${assets.length} music item(s)` });
+      setStatus({ type: 'success', text: `Imported ${audioAssets.length} music item(s)` });
     } catch (error) {
       setStatus({ type: 'error', text: (error as Error).message });
     }
@@ -314,8 +344,28 @@ export function App() {
     }
   };
 
-  const slideDataUrl =
-    selectedItem?.type === 'slide' ? assetDataUrlCache[selectedItem.assetId] : undefined;
+  const onViewerWheel = (event: ReactWheelEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const rect = event.currentTarget.getBoundingClientRect();
+    const cursorX = event.clientX - rect.left;
+    const cursorY = event.clientY - rect.top;
+
+    setZoom((prev) => {
+      const factor = event.deltaY < 0 ? 1.1 : 0.9;
+      const nextScale = Math.min(4, Math.max(0.25, prev.scale * factor));
+      const worldX = (cursorX - prev.x) / prev.scale;
+      const worldY = (cursorY - prev.y) / prev.scale;
+      return {
+        scale: nextScale,
+        x: cursorX - worldX * nextScale,
+        y: cursorY - worldY * nextScale
+      };
+    });
+  };
+
+  const slideDataUrl = selectedItem?.type === 'slide' ? assetDataUrlCache[selectedItem.assetId] : undefined;
+
+  const dialogueLines: DialogueLine[] = selectedSlide?.dialogueLines ?? [];
 
   return (
     <div className="app">
@@ -374,7 +424,6 @@ export function App() {
                 selectItem(item.id);
                 setCurrentTimelineIndex(index);
                 playerRef.current.gotoIndex(index);
-                console.info(`[timeline-click] index=${index} itemId=${item.id}`);
               }}
               className={selectedItemId === item.id ? 'selected' : ''}
             >
@@ -384,39 +433,100 @@ export function App() {
         </aside>
         <section className="viewer">
           <h3>Viewer Stage (OBS)</h3>
-          <div className="stage">
-            {selectedItem ? (
-              selectedItem.type === 'slide' ? (
-                slideDataUrl ? (
-                  <img src={slideDataUrl} alt={selectedItem.label} className="slide-img" />
+          <div className="stage" onWheel={onViewerWheel}>
+            <div
+              className="stage-transform"
+              style={{ transform: `translate(${zoom.x}px, ${zoom.y}px) scale(${zoom.scale})`, transformOrigin: '0 0' }}
+            >
+              {selectedItem ? (
+                selectedItem.type === 'slide' ? (
+                  slideDataUrl ? (
+                    <img src={slideDataUrl} alt={selectedItem.label} className="slide-img" />
+                  ) : (
+                    <p>Loading image…</p>
+                  )
+                ) : selectedItem.type === 'pageBreak' ? (
+                  <div>
+                    <h2>{selectedItem.title}</h2>
+                    <p>{selectedItem.questionsText}</p>
+                  </div>
                 ) : (
-                  <p>Loading image…</p>
+                  <div>
+                    <h2>{selectedItem.label}</h2>
+                    <p>Asset: {selectedItem.assetId}</p>
+                  </div>
                 )
-              ) : selectedItem.type === 'pageBreak' ? (
-                <div>
-                  <h2>{selectedItem.title}</h2>
-                  <p>{selectedItem.questionsText}</p>
-                </div>
               ) : (
-                <div>
-                  <h2>{selectedItem.label}</h2>
-                  <p>Asset: {selectedItem.assetId}</p>
-                </div>
-              )
-            ) : (
-              <p>Select timeline item</p>
-            )}
-          </div>
-          <div className="controls">
-            <button onClick={() => nav('prev')}>Prev</button>
-            <button onClick={() => nav('next')}>Next</button>
-            <button onClick={() => nav('nextPageBreak')}>Jump Next PageBreak</button>
+                <p>Select timeline item</p>
+              )}
+            </div>
           </div>
         </section>
         <aside>
           <h3>Diagnostics</h3>
           <div>studioApi keys: {diagnosticsApiKeys.join(', ')}</div>
           <div>assets.readDataUrl exists: {String(hasReadDataUrl)}</div>
+
+          <button className="collapsible" onClick={() => setMusicOpen((value) => !value)}>
+            {musicOpen ? '▼' : '▶'} Music
+          </button>
+          {musicOpen && (
+            <div className="panel-list">
+              {section?.musicItems.map((music, index) => (
+                <div key={music.id} className="row">
+                  <span>{music.label}</span>
+                  <button onClick={() => setMusicPreviewId((v) => (v === music.id ? null : music.id))}>
+                    {musicPreviewId === music.id ? 'Stop' : 'Play'}
+                  </button>
+                  <button onClick={() => removeMusicItem(music.id)}>Remove</button>
+                  <button disabled={index === 0} onClick={() => reorderMusicItem(index, index - 1)}>
+                    ↑
+                  </button>
+                  <button
+                    disabled={index === (section.musicItems.length - 1)}
+                    onClick={() => reorderMusicItem(index, index + 1)}
+                  >
+                    ↓
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <button className="collapsible" onClick={() => setDialogueOpen((value) => !value)}>
+            {dialogueOpen ? '▼' : '▶'} Dialogue
+          </button>
+          {dialogueOpen && (
+            <div className="panel-list">
+              {selectedSlide ? (
+                <>
+                  <button onClick={() => addDialogueLine(selectedSlide.id)}>+ Add Dialogue Line</button>
+                  {dialogueLines.map((line) => (
+                    <div key={line.id} className="dialogue-line">
+                      <input
+                        value={line.speaker}
+                        onChange={(event) =>
+                          updateDialogueLine(selectedSlide.id, line.id, { speaker: event.target.value })
+                        }
+                        placeholder="Speaker"
+                      />
+                      <textarea
+                        value={line.text}
+                        onChange={(event) =>
+                          updateDialogueLine(selectedSlide.id, line.id, { text: event.target.value })
+                        }
+                        placeholder="Dialogue text"
+                      />
+                      <button onClick={() => removeDialogueLine(selectedSlide.id, line.id)}>Delete</button>
+                    </div>
+                  ))}
+                </>
+              ) : (
+                <div>Select a slide to edit dialogue.</div>
+              )}
+            </div>
+          )}
+
           <h3>Properties</h3>
           {selectedItem?.type === 'pageBreak' && (
             <>
@@ -437,10 +547,7 @@ export function App() {
               />
             </>
           )}
-          <h3>Section Music</h3>
-          {section?.musicItems.map((music) => (
-            <div key={music.id}>{music.label}</div>
-          ))}
+
           <h3>Modules</h3>
           {moduleRegistry.all().map((module) => (
             <div key={module.id}>{module.name}</div>

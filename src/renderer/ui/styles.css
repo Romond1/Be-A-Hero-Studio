@@ -2,14 +2,18 @@ body { margin: 0; font-family: Arial, sans-serif; }
 .app { display: flex; flex-direction: column; height: 100vh; position: relative; }
 header { display: flex; gap: 8px; padding: 8px; border-bottom: 1px solid #ddd; flex-wrap: wrap; }
 .timestamps { display:flex; gap: 12px; font-size: 12px; padding: 4px 8px; }
-main { display: grid; grid-template-columns: 300px 1fr 320px; gap: 10px; padding: 10px; flex: 1; }
+main { display: grid; grid-template-columns: 300px 1fr 360px; gap: 10px; padding: 10px; flex: 1; }
 aside, .viewer { border: 1px solid #ddd; padding: 8px; overflow: auto; }
-.stage { border: 1px dashed #aaa; height: 70%; display:flex; align-items:center; justify-content:center; }
+.stage { border: 1px dashed #aaa; height: 75%; overflow: hidden; position: relative; }
+.stage-transform { position: absolute; left: 0; top: 0; }
 .selected { background: #def; }
 .status { margin: 0 8px 8px; padding: 6px; }
 .status.success { background: #def7de; }
 .status.error { background: #ffdddd; }
 .status.info { background: #e5f0ff; }
-.controls { margin-top: 10px; display: flex; gap: 8px; }
-.slide-img { max-width: 100%; max-height: 100%; object-fit: contain; }
+.slide-img { max-width: 100%; max-height: 100%; object-fit: contain; display: block; }
 .build-banner { position: absolute; right: 10px; top: 10px; z-index: 10; font-size: 12px; background: #111; color: #fff; padding: 4px 8px; border-radius: 4px; }
+.collapsible { width: 100%; text-align: left; margin-top: 8px; }
+.panel-list { border: 1px solid #ddd; padding: 6px; margin-top: 4px; }
+.row { display: grid; grid-template-columns: 1fr auto auto auto auto; gap: 4px; align-items: center; margin-bottom: 4px; }
+.dialogue-line { border: 1px solid #ddd; padding: 6px; margin-top: 6px; display: grid; gap: 4px; }

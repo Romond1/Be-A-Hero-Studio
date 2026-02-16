@@ -16,6 +16,21 @@ interface ProjectContext {
 
 const projectContext: ProjectContext = {};
 
+const SUPPORTED_IMPORT_EXTENSIONS = new Set([
+  'png',
+  'jpg',
+  'jpeg',
+  'webp',
+  'gif',
+  'bmp',
+  'svg',
+  'mp3',
+  'wav',
+  'ogg',
+  'm4a',
+  'aac'
+]);
+
 async function atomicWrite(filePath: string, data: string): Promise<void> {
   const tempPath = `${filePath}.tmp`;
   await fs.writeFile(tempPath, data, 'utf-8');
@@ -52,7 +67,12 @@ function readMime(ext: string): string {
   if (normalized === 'jpg' || normalized === 'jpeg') return 'image/jpeg';
   if (normalized === 'webp') return 'image/webp';
   if (normalized === 'gif') return 'image/gif';
-  if (normalized === 'mp4') return 'video/mp4';
+  if (normalized === 'bmp') return 'image/bmp';
+  if (normalized === 'svg') return 'image/svg+xml';
+  if (normalized === 'wav') return 'audio/wav';
+  if (normalized === 'ogg') return 'audio/ogg';
+  if (normalized === 'm4a') return 'audio/mp4';
+  if (normalized === 'aac') return 'audio/aac';
   if (normalized === 'mp3') return 'audio/mpeg';
   return 'application/octet-stream';
 }
@@ -90,6 +110,21 @@ async function importFileIntoProject(projectPath: string, sourcePath: string) {
     hash,
     assetPath: targetPath
   };
+}
+
+async function collectSupportedFiles(dir: string): Promise<string[]> {
+  const entries = await fs.readdir(dir, { withFileTypes: true });
+  const files: string[] = [];
+  for (const entry of entries) {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...(await collectSupportedFiles(fullPath)));
+    } else {
+      const ext = path.extname(entry.name).replace('.', '').toLowerCase();
+      if (SUPPORTED_IMPORT_EXTENSIONS.has(ext)) files.push(fullPath);
+    }
+  }
+  return files;
 }
 
 async function createWindow(): Promise<void> {
@@ -135,7 +170,8 @@ app.whenReady().then(() => {
     return { projectPath, manifest };
   });
 
-  ipcMain.handle('asset:importMany', async (_event, { projectPath }: { projectPath: string }) => {
+  // Keep stable import IPC name used by renderer bridge.
+  ipcMain.handle('asset:import', async (_event, { projectPath }: { projectPath: string }) => {
     const result = await dialog.showOpenDialog({ properties: ['openFile', 'multiSelections'] });
     if (result.canceled || !result.filePaths.length) throw new Error('Asset import cancelled');
     const orderedPaths = [...result.filePaths].sort((a, b) => path.basename(a).localeCompare(path.basename(b)));
@@ -143,7 +179,20 @@ app.whenReady().then(() => {
     for (const sourcePath of orderedPaths) {
       assets.push(await importFileIntoProject(projectPath, sourcePath));
     }
-    await writeLog(projectPath, `asset:importMany count=${assets.length}`);
+    await writeLog(projectPath, `asset:import count=${assets.length}`);
+    return assets;
+  });
+
+  ipcMain.handle('asset:importFolder', async (_event, { projectPath }: { projectPath: string }) => {
+    const result = await dialog.showOpenDialog({ properties: ['openDirectory'] });
+    if (result.canceled || !result.filePaths[0]) throw new Error('Folder import cancelled');
+    const root = result.filePaths[0];
+    const paths = (await collectSupportedFiles(root)).sort((a, b) => a.localeCompare(b));
+    const assets = [];
+    for (const sourcePath of paths) {
+      assets.push(await importFileIntoProject(projectPath, sourcePath));
+    }
+    await writeLog(projectPath, `asset:importFolder root=${root} count=${assets.length}`);
     return assets;
   });
 
@@ -301,35 +350,21 @@ app.whenReady().then(() => {
     }
   );
 
-  ipcMain.handle(
-    'assets:readDataUrl',
-    async (_event, { projectPath, assetId }: { projectPath: string; assetId: string }) => {
-      try {
-        const activeProjectPath = projectPath;
-
-        let activeManifest = projectContext.manifest;
-        if (!activeManifest || projectContext.projectPath !== activeProjectPath) {
-          const manifestText = await fs.readFile(path.join(activeProjectPath, 'manifest.json'), 'utf-8');
-          const manifest = JSON.parse(manifestText) as ProjectManifest;
-          setProjectContext(activeProjectPath, manifest);
-          activeManifest = manifest;
-        }
-
-        const meta = activeManifest.assetRegistry[assetId];
-        if (!meta) throw new Error(`Asset not found in registry: ${assetId}`);
-        const assetPath = path.join(activeProjectPath, 'assets', `${assetId}.${meta.ext}`);
-        const content = await fs.readFile(assetPath);
-        const mime = readMime(meta.ext);
-        console.info(`[assets:readDataUrl] assetId=${assetId} mime=${mime} bytes=${content.length} success=true`);
-        return `data:${mime};base64,${content.toString('base64')}`;
-      } catch (error) {
-        console.error(
-          `[assets:readDataUrl] assetId=${assetId} success=false error=${(error as Error).message}`
-        );
-        throw error;
-      }
+  // Keep stable readDataUrl behavior: locate <assetId>.<ext> from assets folder directly.
+  ipcMain.handle('asset:readDataUrl', async (_event, { projectPath, assetId }: { projectPath: string; assetId: string }) => {
+    try {
+      const assetsDir = path.join(projectPath, 'assets');
+      const files = await fs.readdir(assetsDir);
+      const fileName = files.find((name) => name.startsWith(`${assetId}.`));
+      if (!fileName) throw new Error(`Asset file not found in assets folder for ${assetId}`);
+      const ext = path.extname(fileName).replace('.', '').toLowerCase();
+      const content = await fs.readFile(path.join(assetsDir, fileName));
+      const mime = readMime(ext);
+      return `data:${mime};base64,${content.toString('base64')}`;
+    } catch (error) {
+      throw new Error(`asset:readDataUrl failed: ${(error as Error).message}`);
     }
-  );
+  });
 
   ipcMain.handle('app:simulateCrash', async () => {
     app.exit(99);

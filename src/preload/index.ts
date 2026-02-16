@@ -6,7 +6,10 @@ const studioApi = {
   buildInfo,
   createProject: () => ipcRenderer.invoke('project:create'),
   openProject: () => ipcRenderer.invoke('project:open'),
-  importAssets: (projectPath: string) => ipcRenderer.invoke('asset:importMany', { projectPath }),
+  importAsset: (projectPath: string) => ipcRenderer.invoke('asset:import', { projectPath }),
+  importFolder: (projectPath: string) => ipcRenderer.invoke('asset:importFolder', { projectPath }),
+  // Backward-compatible alias
+  importAssets: (projectPath: string) => ipcRenderer.invoke('asset:import', { projectPath }),
   saveManifest: (projectPath: string, manifest: ProjectManifest) =>
     ipcRenderer.invoke('project:save', { projectPath, manifest }),
   autosaveManifest: (projectPath: string, manifest: ProjectManifest) =>
@@ -18,7 +21,7 @@ const studioApi = {
     ipcRenderer.invoke('project:healthCheck', { projectPath, manifest }),
   assets: {
     readDataUrl: (projectPath: string, assetId: string) =>
-      ipcRenderer.invoke('assets:readDataUrl', { projectPath, assetId })
+      ipcRenderer.invoke('asset:readDataUrl', { projectPath, assetId })
   },
   simulateCrash: () => ipcRenderer.invoke('app:simulateCrash'),
   getApiKeys: () => Object.keys(studioApi)

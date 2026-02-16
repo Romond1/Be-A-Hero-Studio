@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { v4 as uuid } from 'uuid';
-import type { PageBreakItem, ProjectManifest, Section, TimelineItem } from '../../types/domain';
+import type { DialogueLine, PageBreakItem, ProjectManifest, Section, SlideItem, TimelineItem } from '../../types/domain';
 import { validateManifest } from '../../core/validators';
 
 interface StatusMessage {
@@ -33,6 +33,11 @@ interface StudioStore {
   updatePageBreak: (id: string, patch: Partial<PageBreakItem>) => void;
   reorderTimeline: (source: number, target: number) => void;
   addMusicItem: (assetId: string, label: string) => void;
+  removeMusicItem: (musicId: string) => void;
+  reorderMusicItem: (from: number, to: number) => void;
+  addDialogueLine: (slideId: string) => void;
+  updateDialogueLine: (slideId: string, lineId: string, patch: Partial<DialogueLine>) => void;
+  removeDialogueLine: (slideId: string, lineId: string) => void;
   markSaved: (at: string) => void;
   markAutosaved: (at: string) => void;
   runHealthCheck: () => void;
@@ -234,6 +239,91 @@ export const useStudioStore = create<StudioStore>((set, get) => ({
         }
       };
     }),
+  removeMusicItem: (musicId) =>
+    set((state) => {
+      const section = withSelectedSection(state.manifest, state.selectedSectionId);
+      return {
+        manifest: {
+          ...state.manifest,
+          updatedAt: new Date().toISOString(),
+          sections: state.manifest.sections.map((entry) =>
+            entry.id === section.id
+              ? { ...entry, musicItems: entry.musicItems.filter((music) => music.id !== musicId) }
+              : entry
+          )
+        }
+      };
+    }),
+  reorderMusicItem: (from, to) =>
+    set((state) => {
+      const section = withSelectedSection(state.manifest, state.selectedSectionId);
+      const items = [...section.musicItems];
+      if (!items.length) return state;
+      const [removed] = items.splice(from, 1);
+      items.splice(to, 0, removed);
+      return {
+        manifest: {
+          ...state.manifest,
+          updatedAt: new Date().toISOString(),
+          sections: state.manifest.sections.map((entry) =>
+            entry.id === section.id ? { ...entry, musicItems: items } : entry
+          )
+        }
+      };
+    }),
+  addDialogueLine: (slideId) =>
+    set((state) => ({
+      manifest: {
+        ...state.manifest,
+        updatedAt: new Date().toISOString(),
+        sections: state.manifest.sections.map((section) => ({
+          ...section,
+          timeline: section.timeline.map((item) => {
+            if (item.type !== 'slide' || item.id !== slideId) return item;
+            const slide = item as SlideItem;
+            return {
+              ...slide,
+              dialogueLines: [...(slide.dialogueLines ?? []), { id: uuid(), speaker: 'Speaker', text: '' }]
+            };
+          })
+        }))
+      }
+    })),
+  updateDialogueLine: (slideId, lineId, patch) =>
+    set((state) => ({
+      manifest: {
+        ...state.manifest,
+        updatedAt: new Date().toISOString(),
+        sections: state.manifest.sections.map((section) => ({
+          ...section,
+          timeline: section.timeline.map((item) => {
+            if (item.type !== 'slide' || item.id !== slideId) return item;
+            const slide = item as SlideItem;
+            return {
+              ...slide,
+              dialogueLines: (slide.dialogueLines ?? []).map((line) =>
+                line.id === lineId ? { ...line, ...patch } : line
+              )
+            };
+          })
+        }))
+      }
+    })),
+  removeDialogueLine: (slideId, lineId) =>
+    set((state) => ({
+      manifest: {
+        ...state.manifest,
+        updatedAt: new Date().toISOString(),
+        sections: state.manifest.sections.map((section) => ({
+          ...section,
+          timeline: section.timeline.map((item) => {
+            if (item.type !== 'slide' || item.id !== slideId) return item;
+            const slide = item as SlideItem;
+            return { ...slide, dialogueLines: (slide.dialogueLines ?? []).filter((line) => line.id !== lineId) };
+          })
+        }))
+      }
+    })),
   markSaved: (lastSavedAt) => set({ lastSavedAt }),
   markAutosaved: (lastAutosaveAt) => set({ lastAutosaveAt }),
   registerAsset: (assetId, meta) =>

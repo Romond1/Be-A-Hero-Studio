@@ -22,6 +22,8 @@ declare global {
       buildInfo: BuildInfo;
       createProject: () => Promise<{ projectPath: string; manifest: ProjectManifest }>;
       openProject: () => Promise<{ projectPath: string; manifest: ProjectManifest }>;
+      importAsset: (projectPath: string) => Promise<ImportedAsset[]>;
+      importFolder: (projectPath: string) => Promise<ImportedAsset[]>;
       importAssets: (projectPath: string) => Promise<ImportedAsset[]>;
       saveManifest: (
         projectPath: string,

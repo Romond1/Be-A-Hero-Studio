@@ -25,6 +25,12 @@ export interface DialogueItem {
   volume: number;
 }
 
+export interface DialogueLine {
+  id: string;
+  speaker: string;
+  text: string;
+}
+
 export interface MediaTile {
   id: string;
   assetId: string;
@@ -42,6 +48,7 @@ export interface SlideItem {
   durationMs: number;
   panDirection: 'none' | 'left' | 'right' | 'up' | 'down';
   dialogueItems: DialogueItem[];
+  dialogueLines: DialogueLine[];
 }
 
 export interface VideoItem {
